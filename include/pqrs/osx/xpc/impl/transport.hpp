@@ -145,29 +145,33 @@ public:
         });
   }
 
-  void async_request(peer_id id,
-                     pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>> data,
-                     completion callback) {
+  struct async_request_parameters final {
+    peer_id id;
+    pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>> data;
+    pqrs::osx::xpc::completion completion;
+  };
+
+  void async_request(async_request_parameters parameters) {
     dispatch_async(
         queue_,
         ^{
           run_guarded([&] {
-            auto peer = peers_.find(id);
+            auto peer = peers_.find(parameters.id);
             if (!peer || !peer->ready_for_communication()) {
-              complete(callback,
+              complete(parameters.completion,
                        std::unexpected(make_error_code(errc::not_ready)));
             } else if (options_.common_parameters.max_message_size &&
-                       data->size() > *options_.common_parameters.max_message_size) {
-              complete(callback,
+                       parameters.data->size() > *options_.common_parameters.max_message_size) {
+              complete(parameters.completion,
                        std::unexpected(make_error_code(errc::message_too_large)));
             } else if (peer->get_pending_request_count() >= 128) {
-              complete(callback,
+              complete(parameters.completion,
                        std::unexpected(make_error_code(errc::too_many_requests)));
             } else {
               send_request({
-                  .id = id,
-                  .message = make_message(data),
-                  .callback = callback,
+                  .id = parameters.id,
+                  .message = make_message(parameters.data),
+                  .completion = parameters.completion,
                   .handshake = false,
               });
             }
@@ -496,7 +500,7 @@ private:
     send_request({
         .id = id,
         .message = message,
-        .callback = {},
+        .completion = {},
         .handshake = true,
     });
   }
@@ -597,7 +601,7 @@ private:
     peer_id id;
     // Borrowed only for the duration of send_request; never captured by queued work.
     const dictionary& message;
-    completion callback;
+    pqrs::osx::xpc::completion completion;
     bool handshake;
   };
 
@@ -607,7 +611,7 @@ private:
 
     auto peer = peers_.find(id);
     if (!peer) {
-      complete(parameters.callback,
+      complete(parameters.completion,
                std::unexpected(make_error_code(errc::not_ready)));
       return;
     }
@@ -617,7 +621,7 @@ private:
     peer->add_pending_request(
         request,
         pqrs::osx::xpc::peer::pending_request{
-            .callback = parameters.callback,
+            .completion = parameters.completion,
             .deadline = std::chrono::steady_clock::now() + options_.common_parameters.request_timeout,
             .handshake = parameters.handshake,
         });
@@ -650,7 +654,7 @@ private:
             if (!data) {
               // A reply error describes this request, not necessarily the connection.
               // Only the connection event handler emits peer_interrupted.
-              complete(request_state->callback,
+              complete(request_state->completion,
                        std::unexpected(make_error_code(data.error())));
 
               if (request_state->handshake &&
@@ -676,7 +680,7 @@ private:
               mark_ready_for_communication(id,
                                            *found_peer);
             } else {
-              complete(request_state->callback,
+              complete(request_state->completion,
                        pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>>(data->data));
             }
           });
@@ -700,7 +704,7 @@ private:
   void fail_all_pending_requests(peer& peer,
                                  errc error) {
     for (const auto& [id, request] : peer.take_pending_requests()) {
-      complete(request.callback,
+      complete(request.completion,
                std::unexpected(make_error_code(error)));
     }
   }

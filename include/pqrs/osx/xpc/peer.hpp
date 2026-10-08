@@ -23,7 +23,7 @@ public:
   struct session_identity final {};
 
   struct pending_request {
-    completion callback;
+    pqrs::osx::xpc::completion completion;
     std::chrono::steady_clock::time_point deadline;
     bool handshake;
   };

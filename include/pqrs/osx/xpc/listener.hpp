@@ -19,6 +19,7 @@ public:
   using impl::transport<listener_options>::async_cancel_peer;
   using impl::transport<listener_options>::async_reply;
   using impl::transport<listener_options>::async_request;
+  using impl::transport<listener_options>::async_request_parameters;
   using impl::transport<listener_options>::async_send;
   using impl::transport<listener_options>::async_start;
   using impl::transport<listener_options>::copy_endpoint;

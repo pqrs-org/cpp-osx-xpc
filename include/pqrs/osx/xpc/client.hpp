@@ -19,6 +19,7 @@ public:
   using impl::transport<client_options>::async_cancel_peer;
   using impl::transport<client_options>::async_reply;
   using impl::transport<client_options>::async_request;
+  using impl::transport<client_options>::async_request_parameters;
   using impl::transport<client_options>::async_send;
   using impl::transport<client_options>::async_start;
   using impl::transport<client_options>::connection_failed;
