@@ -13,11 +13,15 @@
 
 namespace pqrs::osx::xpc {
 
+namespace impl {
+template <typename Options>
 class transport;
+}
 
 // Copies share a single-use native XPC reply. Only the owning transport may send it.
 class reply_token final {
-  friend class transport;
+  template <typename Options>
+  friend class impl::transport;
 
   struct state {
     // Created from the incoming request, preserving its native XPC reply context.
