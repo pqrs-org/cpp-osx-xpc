@@ -4,8 +4,11 @@
 // Distributed under the Boost Software License, Version 1.0.
 // (See https://www.boost.org/LICENSE_1_0.txt)
 
+#include "error.hpp"
 #include "object.hpp"
+#include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <span>
 #include <vector>
@@ -58,17 +61,26 @@ public:
              {});
   }
 
+  struct get_data_options final {
+    // Maximum byte count to copy. nullopt means unlimited; zero permits only empty data.
+    std::optional<size_t> max_size;
+  };
+
   // Return an owned copy independent of the dictionary lifetime.
-  // A missing key or incorrect type is distinct from a valid, empty data value.
-  [[nodiscard]] std::optional<std::vector<uint8_t>> get_data(const char* key) const {
+  // Reject missing/mistyped values and oversized data before allocating a copy.
+  [[nodiscard]] std::expected<std::vector<uint8_t>, errc> get_data(const char* key,
+                                                                   const get_data_options& options) const {
     auto value = xpc_dictionary_get_value(get(),
                                           key);
     if (!value ||
         xpc_get_type(value) != XPC_TYPE_DATA) {
-      return std::nullopt;
+      return std::unexpected(errc::invalid_message);
     }
 
     auto size = xpc_data_get_length(value);
+    if (options.max_size && size > *options.max_size) {
+      return std::unexpected(errc::message_too_large);
+    }
     if (size == 0) {
       return std::vector<uint8_t>{};
     }
