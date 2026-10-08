@@ -25,8 +25,9 @@ struct common_options {
     std::optional<uid_t> expected_peer_uid;
 
     // Maximum payload size in bytes for outgoing and incoming messages/replies.
-    // Does not include XPC protocol metadata. Must be greater than zero.
-    size_t max_message_size{32 * 1024};
+    // Does not include XPC protocol metadata. Zero permits only empty payloads.
+    // nullopt disables this library's limit; system resource limits still apply.
+    std::optional<size_t> max_message_size{32 * 1024};
 
     // Reply deadline for each request, including the initial handshake.
     // Expiration invalidates the peer and fails its pending requests.
@@ -34,8 +35,7 @@ struct common_options {
     std::chrono::milliseconds request_timeout{15000};
 
     [[nodiscard]] bool validate() const noexcept {
-      return max_message_size > 0 &&
-             request_timeout.count() > 0;
+      return request_timeout.count() > 0;
     }
   };
 
