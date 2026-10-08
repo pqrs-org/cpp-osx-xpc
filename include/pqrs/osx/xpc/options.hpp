@@ -53,15 +53,19 @@ struct listener_options final : public common_options {
     std::string service_name;
   };
 
+  struct configuration final {
+    common_options::parameters common_parameters;
+    parameters listener_parameters;
+  };
+
   listener_options() = default;
 
   explicit listener_options(const common_options::parameters& common_parameters)
       : common_options(common_parameters) {}
 
-  listener_options(const common_options::parameters& common_parameters,
-                   const parameters& parameters)
-      : common_options(common_parameters),
-        listener_parameters(parameters) {}
+  explicit listener_options(const configuration& configuration)
+      : common_options(configuration.common_parameters),
+        listener_parameters(configuration.listener_parameters) {}
 
   [[nodiscard]] bool validate() const noexcept {
     return common_parameters.validate();
@@ -93,15 +97,19 @@ struct client_options final : public common_options {
     }
   };
 
+  struct configuration final {
+    common_options::parameters common_parameters;
+    parameters client_parameters;
+  };
+
   client_options() = default;
 
   explicit client_options(const common_options::parameters& common_parameters)
       : common_options(common_parameters) {}
 
-  client_options(const common_options::parameters& common_parameters,
-                 const parameters& parameters)
-      : common_options(common_parameters),
-        client_parameters(parameters) {}
+  explicit client_options(const configuration& configuration)
+      : common_options(configuration.common_parameters),
+        client_parameters(configuration.client_parameters) {}
 
   [[nodiscard]] bool validate() const noexcept {
     return common_parameters.validate() &&
