@@ -56,14 +56,6 @@ public:
     return value_;
   }
 
-  [[nodiscard]] xpc_connection_t connection() const noexcept {
-    return static_cast<xpc_connection_t>(value_);
-  }
-
-  [[nodiscard]] xpc_endpoint_t endpoint() const noexcept {
-    return static_cast<xpc_endpoint_t>(value_);
-  }
-
 private:
   struct adopt_tag final {};
 
