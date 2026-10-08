@@ -47,20 +47,6 @@ public:
     return value_.get();
   }
 
-  void set_data(const char* key,
-                std::span<const uint8_t> value) {
-    xpc_dictionary_set_data(get(),
-                            key,
-                            value.data(),
-                            value.size());
-  }
-
-  // Sets a zero-length data value without removing the key.
-  void set_empty_data(const char* key) {
-    set_data(key,
-             {});
-  }
-
   struct get_data_options final {
     // Maximum byte count to copy. nullopt means unlimited; zero permits only empty data.
     std::optional<size_t> max_size;
@@ -90,11 +76,30 @@ public:
                                 data + size);
   }
 
-  void set_bool(const char* key,
-                bool value) {
-    xpc_dictionary_set_bool(get(),
+  void set_data(const char* key,
+                std::span<const uint8_t> value) {
+    xpc_dictionary_set_data(get(),
                             key,
-                            value);
+                            value.data(),
+                            value.size());
+  }
+
+  // Sets a zero-length data value without removing the key.
+  void set_empty_data(const char* key) {
+    set_data(key,
+             {});
+  }
+
+  [[nodiscard]] std::optional<uint64_t> get_uint64(const char* key) const {
+    auto value = xpc_dictionary_get_value(get(), key);
+    if (!value || xpc_get_type(value) != XPC_TYPE_UINT64) {
+      return std::nullopt;
+    }
+    return xpc_uint64_get_value(value);
+  }
+
+  void set_uint64(const char* key, uint64_t value) {
+    xpc_dictionary_set_uint64(get(), key, value);
   }
 
   [[nodiscard]] std::optional<bool> get_bool(const char* key) const {
@@ -106,6 +111,13 @@ public:
     }
 
     return xpc_bool_get_value(value);
+  }
+
+  void set_bool(const char* key,
+                bool value) {
+    xpc_dictionary_set_bool(get(),
+                            key,
+                            value);
   }
 
 private:
