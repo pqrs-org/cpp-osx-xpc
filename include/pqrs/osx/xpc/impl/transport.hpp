@@ -160,13 +160,16 @@ public:
             if (!peer || !peer->ready_for_communication()) {
               complete(parameters.completion,
                        std::unexpected(make_error_code(errc::not_ready)));
+
             } else if (options_.common_parameters.max_message_size &&
                        parameters.data->size() > *options_.common_parameters.max_message_size) {
               complete(parameters.completion,
                        std::unexpected(make_error_code(errc::message_too_large)));
+
             } else if (peer->get_pending_request_count() >= 128) {
               complete(parameters.completion,
                        std::unexpected(make_error_code(errc::too_many_requests)));
+
             } else {
               send_request({
                   .id = parameters.id,
