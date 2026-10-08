@@ -48,7 +48,7 @@ public:
                                     dispatch_queue_t queue) noexcept {
     if (options.listener_parameters.service_name.empty()) {
       // Create an anonymous listener, which cannot be looked up by service name.
-      // After transport::listener_started, obtain its endpoint with copy_endpoint()
+      // After listener::listener_started, obtain its endpoint with copy_endpoint()
       // and pass it to client_options::parameters::endpoint to connect.
       // Useful for tests without launchd setup. Cross-process use requires a
       // separate channel to transfer the endpoint (e.g. an existing XPC connection);
