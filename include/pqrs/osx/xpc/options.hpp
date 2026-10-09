@@ -31,11 +31,13 @@ struct common_options {
 
     // Interval for checking request deadlines and scheduling connection retries.
     // Shorter intervals improve responsiveness but increase timer wakeups.
-    // Must be positive.
+    // Must be positive and no greater than one hour.
     std::chrono::milliseconds tick_interval{1000};
 
     [[nodiscard]] bool validate() const noexcept {
-      return request_timeout.count() > 0 && tick_interval.count() > 0;
+      return request_timeout.count() > 0 &&
+             tick_interval.count() > 0 &&
+             tick_interval <= std::chrono::hours{1};
     }
   };
 

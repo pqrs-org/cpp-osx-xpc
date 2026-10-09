@@ -167,6 +167,10 @@ int main() {
                            })
                 .validate());
 
+    // Accept the inclusive one-hour boundary and reject larger timer intervals.
+    expect(listener_options({.tick_interval = 1h}).validate());
+    expect(!client_options({.tick_interval = 1h + 1ms}).validate());
+
     // Reject nonpositive reconnect intervals both during validation and construction.
     auto invalid_client_options = client_options({
         .common_parameters = {},

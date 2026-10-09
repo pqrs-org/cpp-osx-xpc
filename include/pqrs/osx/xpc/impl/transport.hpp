@@ -768,6 +768,11 @@ void tick() noexcept {
     }
   });
 
+  // Stop the timer chain after terminal failure, including failure during this tick.
+  if (failed_->load()) {
+    return;
+  }
+
   auto alive = alive_;
   dispatch_after(
       dispatch_time(DISPATCH_TIME_NOW,
