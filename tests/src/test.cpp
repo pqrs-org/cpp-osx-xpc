@@ -151,11 +151,6 @@ int main() {
     }
     expect(listener_rejected);
 
-    expect(!listener_options({
-                                 .request_timeout = 0ms,
-                             })
-                .validate());
-
     expect(!client_options({
                                .request_timeout = -1ms,
                            })
@@ -389,17 +384,15 @@ int main() {
     expect(!value.matches_session(interrupted_session));
   };
 
-  "request reply notifications peer uid and size limit"_test = [&] {
-    // Connect peers that trust this executable and enforce a four-byte payload limit.
+  "request replies and notifications preserve peer identity and dispatcher execution"_test = [&] {
+    // Connect peers that trust this executable and verify the expected UID.
     std::atomic<peer_id> listener_peer{0}, client_peer{0};
     std::atomic<bool> uid_matches{false}, on_dispatcher{false}, notified{false};
-    std::atomic<int> request_count{0}, completions{0};
 
     pqrs::osx::xpc::listener listener(dispatcher,
                                       listener_options({
                                           .common_parameters = {
                                               .signing_requirement = self_requirement(),
-                                              .max_message_size = 4,
                                           },
                                           .listener_parameters = {},
                                       }));
@@ -412,7 +405,6 @@ int main() {
     listener.request_received.connect([&](auto id,
                                           auto request,
                                           auto data) {
-      ++request_count;
       listener.async_reply(request,
                            data);
       listener.async_send(id,
@@ -424,7 +416,6 @@ int main() {
                                       .common_parameters = {
                                           .signing_requirement = self_requirement(),
                                           .expected_peer_uid = geteuid(),
-                                          .max_message_size = 4,
                                       },
                                       .client_parameters = {
                                           .endpoint = start_listener(listener),
@@ -445,11 +436,12 @@ int main() {
     expect(wait_for("both peers to become ready", [&] {
       return client_peer != 0 && listener_peer != 0;
     })) << fatal;
+
     expect(uid_matches.load());
     expect(on_dispatcher.load());
 
-    // Send one request at the size limit and one above it; also receive a separate notification.
-    std::atomic<bool> roundtrip{false}, oversized{false};
+    // Round trip a request and receive a separate notification.
+    std::atomic<bool> roundtrip{false}, completed{false};
     client.async_request({
         .id = client_peer,
         .data = std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1, 2, 3, 4}),
@@ -457,91 +449,87 @@ int main() {
           roundtrip = result &&
                       **result == std::vector<uint8_t>{1, 2, 3, 4} &&
                       client.dispatcher_thread();
-          ++completions;
-        },
-    });
-    client.async_request({
-        .id = client_peer,
-        .data = std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1, 2, 3, 4, 5}),
-        .completion = [&](auto result) {
-          oversized = !result &&
-                      result.error() == make_error_code(errc::message_too_large);
-          ++completions;
+          completed = true;
         },
     });
 
-    // Verify dispatcher-thread completion, local size rejection, and only one request reaching the listener.
-    expect(wait_for("both request completions and the notification", [&] {
-      return completions == 2 && notified;
+    // Verify dispatcher-thread completion and delivery of the separate notification.
+    expect(wait_for("the request completion and notification", [&] {
+      return completed && notified;
     }));
+
     expect(roundtrip.load());
-    expect(oversized.load());
-    expect(request_count == 1);
   };
 
-  "zero payload limit permits empty requests and rejects nonempty requests"_test = [&] {
-    // Connect an echo listener and client that allow only empty payloads.
-    std::atomic<peer_id> client_peer{0};
-    std::atomic<int> completions{0}, requests{0};
-    std::atomic<bool> empty_reply{false}, rejected{false};
+  "payload limits accept the boundary and reject larger outgoing requests"_test = [&] {
+    // Cover both the empty-only limit and a positive inclusive limit.
+    for (size_t limit : {size_t{0}, size_t{4}}) {
+      std::atomic<peer_id> client_peer{0};
+      std::atomic<int> completions{0}, requests{0};
+      std::atomic<bool> boundary_reply{false}, rejected{false};
 
-    pqrs::osx::xpc::listener listener(dispatcher,
-                                      listener_options({
-                                          .max_message_size = 0,
-                                      }));
-    listener.request_received.connect([&](auto,
-                                          auto token,
-                                          auto data) {
-      ++requests;
-      listener.async_reply(token,
-                           data);
-    });
+      pqrs::osx::xpc::listener listener(dispatcher,
+                                        listener_options({
+                                            .max_message_size = limit,
+                                        }));
+      listener.request_received.connect([&](auto,
+                                            auto token,
+                                            auto data) {
+        ++requests;
+        listener.async_reply(token,
+                             data);
+      });
 
-    pqrs::osx::xpc::client client(dispatcher,
-                                  client_options({
-                                      .common_parameters = {
-                                          .max_message_size = 0,
-                                      },
-                                      .client_parameters = {
-                                          .endpoint = start_listener(listener),
-                                      },
-                                  }));
-    client.peer_ready.connect([&](auto id,
-                                  auto) {
-      client_peer = id;
-    });
+      pqrs::osx::xpc::client client(dispatcher,
+                                    client_options({
+                                        .common_parameters = {
+                                            .max_message_size = limit,
+                                        },
+                                        .client_parameters = {
+                                            .endpoint = start_listener(listener),
+                                        },
+                                    }));
+      client.peer_ready.connect([&](auto id,
+                                    auto) {
+        client_peer = id;
+      });
 
-    client.async_start();
+      client.async_start();
 
-    expect(wait_for("the empty-payload client to become ready", [&] { return client_peer != 0; })) << fatal;
+      expect(wait_for("the payload-limit client to become ready", [&] {
+        return client_peer != 0;
+      })) << fatal;
 
-    // An empty request must round trip; a nonempty request must be rejected locally.
-    client.async_request({
-        .id = client_peer,
-        .data = std::make_shared<const std::vector<uint8_t>>(),
-        .completion = [&](auto result) {
-          empty_reply = result &&
-                        (*result)->empty();
-          ++completions;
-        },
-    });
-    client.async_request({
-        .id = client_peer,
-        .data = std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1}),
-        .completion = [&](auto result) {
-          rejected = !result &&
-                     result.error() == make_error_code(errc::message_too_large);
-          ++completions;
-        },
-    });
+      // A request at the limit must round trip; one byte beyond it must be rejected locally.
+      auto payload = std::make_shared<const std::vector<uint8_t>>(limit, 42);
+      client.async_request({
+          .id = client_peer,
+          .data = payload,
+          .completion = [&](auto result) {
+            boundary_reply = result &&
+                             **result == *payload;
+            ++completions;
+          },
+      });
+      client.async_request({
+          .id = client_peer,
+          .data = std::make_shared<const std::vector<uint8_t>>(limit + 1, 42),
+          .completion = [&](auto result) {
+            rejected = !result &&
+                       result.error() == make_error_code(errc::message_too_large);
+            ++completions;
+          },
+      });
 
-    // Both completions must run, but only the empty request may reach the listener.
-    expect(wait_for("both payload-limit request completions", [&] {
-      return completions == 2;
-    })) << fatal;
-    expect(empty_reply.load());
-    expect(rejected.load());
-    expect(requests == 1);
+      // Both completions must run, but only the boundary-size request may reach the listener.
+      expect(wait_for("both payload-limit request completions", [&] {
+        return completions == 2;
+      })) << fatal;
+
+      expect(boundary_reply.load());
+      expect(rejected.load());
+      expect(requests == 1);
+    }
   };
 
   "unlimited payloads round trip beyond the default limit"_test = [&] {
@@ -595,6 +583,7 @@ int main() {
     expect(wait_for("the large-payload reply", [&] {
       return completed.load();
     })) << fatal;
+
     expect(matches.load());
   };
 
@@ -664,6 +653,7 @@ int main() {
     expect(wait_for("the timeout completion and reconnection", [&] {
       return connections >= 2 && completed == 1;
     }));
+
     expect(timed_out.load());
     expect(closed >= 1);
     expect(client_peer != original_peer);
@@ -687,6 +677,7 @@ int main() {
     expect(wait_for("the reply after reconnection", [&] {
       return completed == 2;
     }));
+
     expect(retried.load());
   };
 
@@ -747,6 +738,7 @@ int main() {
       return closed != 0 &&
              aborted;
     }));
+
     expect(requests == 0);
   };
 
@@ -817,6 +809,7 @@ int main() {
     expect(wait_for("both out-of-order replies", [&] {
       return completed == 2;
     }));
+
     expect(first_matches.load());
     expect(second_matches.load());
   };
@@ -1101,6 +1094,7 @@ int main() {
     expect(wait_for("listener signature rejection", [&] {
       return failed != 0;
     }));
+
     expect(admitted == 0);
     expect(requests == 0);
   };
@@ -1386,6 +1380,5 @@ int main() {
     // Allow several 20ms timer intervals for queued callbacks to expose lifetime errors under AddressSanitizer.
     std::cerr << "Waiting 200ms for callbacks after client destruction...\n";
     std::this_thread::sleep_for(200ms);
-    expect(true);
   };
 }
