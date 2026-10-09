@@ -34,8 +34,13 @@ struct common_options {
     // Must be positive; expiration is checked on the periodic transport tick.
     std::chrono::milliseconds request_timeout{15000};
 
+    // Interval for checking request deadlines and scheduling connection retries.
+    // Shorter intervals improve responsiveness but increase timer wakeups.
+    // Must be positive.
+    std::chrono::milliseconds tick_interval{1000};
+
     [[nodiscard]] bool validate() const noexcept {
-      return request_timeout.count() > 0;
+      return request_timeout.count() > 0 && tick_interval.count() > 0;
     }
   };
 

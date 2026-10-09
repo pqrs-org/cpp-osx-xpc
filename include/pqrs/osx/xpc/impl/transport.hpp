@@ -478,12 +478,14 @@ private:
     auto alive = alive_;
     peer_connection.set_event_handler(
         ^(xpc_object_t event) {
-          if (*alive) {
-            run_guarded([&] {
-              handle_event(id,
-                           event);
-            });
+          if (!*alive) {
+            return;
           }
+
+          run_guarded([&] {
+            handle_event(id,
+                         event);
+          });
         });
 
     peer_connection.resume();
@@ -778,12 +780,16 @@ private:
     auto alive = alive_;
     dispatch_after(
         dispatch_time(DISPATCH_TIME_NOW,
-                      NSEC_PER_SEC),
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          options_.common_parameters.tick_interval)
+                          .count()),
         queue_,
         ^{
-          if (*alive) {
-            tick();
+          if (!*alive) {
+            return;
           }
+
+          tick();
         });
   }
 
