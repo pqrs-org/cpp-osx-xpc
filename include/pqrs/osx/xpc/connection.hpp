@@ -167,16 +167,20 @@ public:
     return false;
   }
 
+  struct send_message_with_reply_parameters final {
+    const dictionary& message;
+    dispatch_queue_t queue;
+    xpc_handler_t handler;
+  };
+
   // false means no reply handler will be scheduled by this call.
-  bool send_message_with_reply(const dictionary& message,
-                               dispatch_queue_t queue,
-                               xpc_handler_t handler) noexcept {
+  bool send_message_with_reply(const send_message_with_reply_parameters& parameters) noexcept {
     if (auto connection = get()) {
-      if (auto m = message.get()) {
+      if (auto m = parameters.message.get()) {
         xpc_connection_send_message_with_reply(connection,
                                                m,
-                                               queue,
-                                               handler);
+                                               parameters.queue,
+                                               parameters.handler);
         return true;
       }
     }
