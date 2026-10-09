@@ -45,7 +45,7 @@ public:
   nod::signal<void()> listener_started;
   nod::signal<void(const std::error_code&)> listener_failed;
   nod::signal<void(const std::error_code&)> connection_failed;
-  nod::signal<void(peer_id, uid_t)> peer_ready;
+  nod::signal<void(peer_id)> peer_ready;
   nod::signal<void(peer_id)> peer_interrupted;
   nod::signal<void(peer_id, const std::error_code&)> peer_invalidated;
   nod::signal<void(peer_id, std::shared_ptr<const std::vector<uint8_t>>)> message_received;
@@ -356,17 +356,11 @@ private:
     std::shared_ptr<const std::vector<uint8_t>> data;
   };
 
-  std::expected<received_message, errc> read_message(const peer& peer,
-                                                     xpc_object_t event,
+  std::expected<received_message, errc> read_message(xpc_object_t event,
                                                      std::optional<message_type> expected_type = {}) const {
     auto message = dictionary::from_xpc_object(event);
     if (!message) {
       return std::unexpected(connection_error(event));
-    }
-
-    if (options_.common_parameters.expected_peer_uid &&
-        peer.get_connection().get_peer_uid() != *options_.common_parameters.expected_peer_uid) {
-      return std::unexpected(errc::unexpected_peer_uid);
     }
 
     auto raw_type = message->get_uint64(type_key);
@@ -512,15 +506,12 @@ private:
 
   void mark_ready_for_communication(peer_id id,
                                     peer& peer) {
-    auto uid = peer.get_connection().get_peer_uid();
-    if (!uid ||
-        !peer.mark_ready_for_communication()) {
+    if (!peer.mark_ready_for_communication()) {
       return;
     }
 
-    enqueue_notification([this, id, uid] {
-      peer_ready(id,
-                 *uid);
+    enqueue_notification([this, id] {
+      peer_ready(id);
     });
   }
 
@@ -538,8 +529,7 @@ private:
       return;
     }
 
-    auto data = read_message(*found_peer,
-                             event);
+    auto data = read_message(event);
     if (!data) {
       handle_failure(id,
                      data.error());
@@ -651,8 +641,7 @@ private:
       return;
     }
 
-    auto data = read_message(*found_peer,
-                             event,
+    auto data = read_message(event,
                              request_state->handshake
                                  ? message_type::hello_reply
                                  : message_type::data);

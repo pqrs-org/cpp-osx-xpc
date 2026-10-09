@@ -227,7 +227,6 @@ int main() {
     expect(empty.set_peer_code_signing_requirement("anchor apple") == EINVAL);
     expect(empty.get() == nullptr);
     expect(!empty.copy_endpoint());
-    expect(!empty.get_peer_uid());
 
     // Sending without a connection must report failure without calling XPC.
     dictionary message;
@@ -409,10 +408,10 @@ int main() {
     expect(!value.matches_session(interrupted_session));
   };
 
-  "request replies and notifications preserve peer identity and dispatcher execution"_test = [&] {
-    // Connect peers that trust this executable and verify the expected UID.
+  "request replies and notifications preserve dispatcher execution"_test = [&] {
+    // Connect peers that trust this executable.
     std::atomic<peer_id> listener_peer{0}, client_peer{0};
-    std::atomic<bool> uid_matches{false}, on_dispatcher{false}, notified{false};
+    std::atomic<bool> on_dispatcher{false}, notified{false};
 
     pqrs::osx::xpc::listener listener(dispatcher,
                                       listener_options({
@@ -421,10 +420,8 @@ int main() {
                                           },
                                           .listener_parameters = {},
                                       }));
-    listener.peer_ready.connect([&](auto id,
-                                    auto uid) {
+    listener.peer_ready.connect([&](auto id) {
       listener_peer = id;
-      uid_matches = uid == geteuid();
       on_dispatcher = listener.dispatcher_thread();
     });
     listener.request_received.connect([&](auto id,
@@ -440,14 +437,12 @@ int main() {
                                   client_options({
                                       .common_parameters = {
                                           .signing_requirement = self_requirement(),
-                                          .expected_peer_uid = geteuid(),
                                       },
                                       .client_parameters = {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  const auto&) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
     client.message_received.connect([&](auto,
@@ -455,14 +450,13 @@ int main() {
       notified = *data == std::vector<uint8_t>{4, 3, 2, 1};
     });
 
-    // Wait for the handshake and verify the peer UID and notification thread.
+    // Wait for the handshake and verify the notification thread.
     client.async_start();
 
     expect(wait_for("both peers to become ready", [&] {
       return client_peer != 0 && listener_peer != 0;
     })) << fatal;
 
-    expect(uid_matches.load());
     expect(on_dispatcher.load());
 
     // Round trip a request and receive a separate notification.
@@ -514,8 +508,7 @@ int main() {
                                             .endpoint = start_listener(listener),
                                         },
                                     }));
-      client.peer_ready.connect([&](auto id,
-                                    auto) {
+      client.peer_ready.connect([&](auto id) {
         client_peer = id;
       });
 
@@ -582,8 +575,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  auto) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
 
@@ -646,8 +638,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  const auto&) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
       ++connections;
     });
@@ -738,8 +729,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  const auto&) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
     client.async_start();
@@ -800,8 +790,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  const auto&) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
 
@@ -849,8 +838,7 @@ int main() {
                                           .common_parameters = {},
                                           .listener_parameters = {},
                                       }));
-    listener.peer_ready.connect([&](auto id,
-                                    auto) {
+    listener.peer_ready.connect([&](auto id) {
       listener_peer = id;
     });
 
@@ -861,8 +849,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  auto) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
 
@@ -942,8 +929,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  const auto&) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
     client.peer_interrupted.connect([&](auto) {
@@ -1012,8 +998,7 @@ int main() {
                 .endpoint = start_listener(listener),
             },
         }));
-    client.peer_ready.connect([&](auto,
-                                  const auto&) {
+    client.peer_ready.connect([&](auto) {
       ++admitted;
     });
     client.peer_invalidated.connect([&](auto,
@@ -1033,46 +1018,6 @@ int main() {
     expect(admitted == 0);
   };
 
-  "UID mismatch does not admit client"_test = [&] {
-    // Require a UID different from the actual listener process UID.
-    std::atomic<int> admitted{0}, failed{0};
-
-    pqrs::osx::xpc::listener listener(dispatcher,
-                                      listener_options({
-                                          .common_parameters = {},
-                                          .listener_parameters = {},
-                                      }));
-    pqrs::osx::xpc::client client(dispatcher,
-                                  client_options({
-                                      .common_parameters = {
-                                          .expected_peer_uid = static_cast<uid_t>(geteuid() + 1),
-                                      },
-                                      .client_parameters = {
-                                          .endpoint = start_listener(listener),
-                                      },
-                                  }));
-    client.peer_ready.connect([&](auto,
-                                  const auto&) {
-      ++admitted;
-    });
-    client.peer_invalidated.connect([&](auto,
-                                        const auto&) {
-      ++failed;
-    });
-    client.connection_failed.connect([&](const auto&) {
-      ++failed;
-    });
-
-    // Verify connection failure or invalidation occurs before the peer becomes ready.
-    client.async_start();
-
-    expect(wait_for("UID mismatch rejection", [&] {
-      return failed != 0;
-    }));
-
-    expect(admitted == 0);
-  };
-
   "signature requirement rejects a peer before application messages"_test = [&] {
     // Configure the listener to reject the connecting executable before accepting application traffic.
     std::atomic<int> admitted{0}, requests{0}, failed{0};
@@ -1085,8 +1030,7 @@ int main() {
             },
             .listener_parameters = {},
         }));
-    listener.peer_ready.connect([&](auto,
-                                    const auto&) {
+    listener.peer_ready.connect([&](auto) {
       ++admitted;
     });
     listener.request_received.connect([&](auto,
@@ -1226,8 +1170,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  auto) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
     client.error_occurred.connect([&](const error_info& error) {
@@ -1336,8 +1279,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id,
-                                  auto) {
+    client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
     client.error_occurred.connect([&](const error_info& error) {

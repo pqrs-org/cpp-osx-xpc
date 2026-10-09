@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <optional>
 #include <string>
-#include <sys/types.h>
 
 namespace pqrs::osx::xpc {
 
@@ -19,10 +18,6 @@ struct common_options {
     // nullopt skips this check and permits unsigned peers for development.
     // An invalid requirement prevents the connection from being used.
     std::optional<std::string> signing_requirement;
-
-    // Reject incoming messages/replies from peers with a different effective UID.
-    // nullopt disables the UID restriction; signing_requirement still applies.
-    std::optional<uid_t> expected_peer_uid;
 
     // Maximum payload size in bytes for outgoing and incoming messages/replies.
     // Does not include XPC protocol metadata. Zero permits only empty payloads.

@@ -14,7 +14,6 @@ enum class errc {
   connection_invalid,
   signature_rejected,
   invalid_signing_requirement,
-  unexpected_peer_uid,
   invalid_message,
   message_too_large,
   not_ready,
@@ -41,8 +40,6 @@ inline std::error_code make_error_code(errc value) noexcept {
           return "XPC peer signature rejected";
         case errc::invalid_signing_requirement:
           return "Invalid XPC signing requirement";
-        case errc::unexpected_peer_uid:
-          return "Unexpected XPC peer UID";
         case errc::invalid_message:
           return "Invalid XPC message";
         case errc::message_too_large:

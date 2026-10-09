@@ -6,7 +6,6 @@
 #include <memory>
 #include <pqrs/osx/xpc.hpp>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -42,7 +41,6 @@ int main() {
                                       listener_options({
                                           .common_parameters = {
                                               .signing_requirement = std::nullopt,
-                                              .expected_peer_uid = geteuid(),
                                           },
                                           .listener_parameters = {},
                                       }));
@@ -74,7 +72,6 @@ int main() {
                                   client_options({
                                       .common_parameters = {
                                           .signing_requirement = std::nullopt,
-                                          .expected_peer_uid = geteuid(),
                                       },
                                       .client_parameters = {
                                           .endpoint = listener.copy_endpoint(),
@@ -88,7 +85,7 @@ int main() {
       std::cerr << "Connection failed: " << error.message() << '\n';
       finish(1);
     });
-    client.peer_ready.connect([&](auto id, auto) {
+    client.peer_ready.connect([&](auto id) {
       const std::string message = "Hello from cpp-osx-xpc!";
       auto data = std::make_shared<const std::vector<uint8_t>>(message.begin(),
                                                                message.end());

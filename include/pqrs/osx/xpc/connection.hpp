@@ -9,9 +9,7 @@
 #include "options.hpp"
 #include <cerrno>
 #include <dispatch/dispatch.h>
-#include <optional>
 #include <string>
-#include <sys/types.h>
 #include <utility>
 #include <xpc/xpc.h>
 
@@ -148,14 +146,6 @@ public:
     }
 
     return {};
-  }
-
-  [[nodiscard]] std::optional<uid_t> get_peer_uid() const noexcept {
-    if (auto connection = get()) {
-      return xpc_connection_get_euid(connection);
-    }
-
-    return std::nullopt;
   }
 
   // true means the native send API was called, not that delivery succeeded.
