@@ -156,6 +156,9 @@ int main() {
                            })
                 .validate());
 
+    expect(listener_options({.request_timeout = 1h}).validate());
+    expect(!client_options({.request_timeout = 1h + 1ms}).validate());
+
     // Reject nonpositive tick intervals so the periodic timer cannot busy-loop.
     expect(!listener_options({
                                  .tick_interval = 0ms,
@@ -170,6 +173,18 @@ int main() {
     // Accept the inclusive one-hour boundary and reject larger timer intervals.
     expect(listener_options({.tick_interval = 1h}).validate());
     expect(!client_options({.tick_interval = 1h + 1ms}).validate());
+
+    // Validate the inclusive one-hour boundary for reconnect intervals.
+    expect(client_options({
+                              .common_parameters = {},
+                              .client_parameters = {.reconnect_interval = 1h},
+                          })
+               .validate());
+    expect(!client_options({
+                               .common_parameters = {},
+                               .client_parameters = {.reconnect_interval = 1h + 1ms},
+                           })
+                .validate());
 
     // Reject nonpositive reconnect intervals both during validation and construction.
     auto invalid_client_options = client_options({

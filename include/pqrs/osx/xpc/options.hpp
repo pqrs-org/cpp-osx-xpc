@@ -26,7 +26,8 @@ struct common_options {
 
     // Reply deadline for each request, including the initial handshake.
     // Expiration invalidates the peer and fails its pending requests.
-    // Must be positive; expiration is checked on the periodic transport tick.
+    // Must be positive and no greater than one hour.
+    // Expiration is checked on the periodic transport tick.
     std::chrono::milliseconds request_timeout{15000};
 
     // Interval for checking request deadlines and scheduling connection retries.
@@ -36,6 +37,7 @@ struct common_options {
 
     [[nodiscard]] bool validate() const noexcept {
       return request_timeout.count() > 0 &&
+             request_timeout <= std::chrono::hours{1} &&
              tick_interval.count() > 0 &&
              tick_interval <= std::chrono::hours{1};
     }
@@ -86,7 +88,8 @@ struct client_options final : public common_options {
     bool privileged{false};
 
     // Delay before reconnecting or retrying an interrupted handshake.
-    // Must be positive; retries run on the periodic transport tick.
+    // Must be positive and no greater than one hour.
+    // Retries run on the periodic transport tick.
     std::chrono::milliseconds reconnect_interval{1000};
 
     // Retained XPC endpoint for connecting directly to an anonymous listener.
@@ -96,6 +99,7 @@ struct client_options final : public common_options {
 
     [[nodiscard]] bool validate() const noexcept {
       return reconnect_interval.count() > 0 &&
+             reconnect_interval <= std::chrono::hours{1} &&
              (!endpoint ||
               xpc_get_type(endpoint.get()) == XPC_TYPE_ENDPOINT);
     }
