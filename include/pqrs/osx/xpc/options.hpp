@@ -98,7 +98,9 @@ struct client_options final : public common_options {
     object endpoint{};
 
     [[nodiscard]] bool validate() const noexcept {
-      return reconnect_interval.count() > 0;
+      return reconnect_interval.count() > 0 &&
+             (!endpoint ||
+              xpc_get_type(endpoint.get()) == XPC_TYPE_ENDPOINT);
     }
   };
 

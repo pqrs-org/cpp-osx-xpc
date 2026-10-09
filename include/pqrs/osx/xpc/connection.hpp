@@ -65,6 +65,10 @@ public:
   static connection create_client(const client_options& options,
                                   dispatch_queue_t queue) noexcept {
     if (options.client_parameters.endpoint.get()) {
+      if (xpc_get_type(options.client_parameters.endpoint.get()) != XPC_TYPE_ENDPOINT) {
+        return {};
+      }
+
       auto result = connection(adopt_xpc_object(xpc_connection_create_from_endpoint(
           static_cast<xpc_endpoint_t>(options.client_parameters.endpoint.get()))));
 

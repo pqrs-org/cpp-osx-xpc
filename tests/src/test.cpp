@@ -194,6 +194,31 @@ int main() {
                 .validate());
   };
 
+  "client endpoint validation rejects non-endpoint objects before calling XPC"_test = [&] {
+    pqrs::osx::xpc::listener listener(dispatcher);
+    client_options options;
+    expect(options.validate());
+
+    options.client_parameters.endpoint = start_listener(listener);
+    expect(options.validate());
+
+    dictionary invalid_endpoint;
+    options.client_parameters.endpoint = object(invalid_endpoint.get());
+    expect(!options.validate());
+    expect(!connection::create_client(options,
+                                      nullptr)
+                .get());
+
+    bool rejected = false;
+    try {
+      pqrs::osx::xpc::client client(dispatcher,
+                                    options);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    expect(rejected);
+  };
+
   "empty connection operations are safe and report missing connection"_test = [] {
     // Exercise configuration and inspection without a native connection.
     connection empty;
