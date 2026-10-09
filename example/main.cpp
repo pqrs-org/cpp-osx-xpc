@@ -38,32 +38,32 @@ int main() {
 
     // nullopt allows unsigned peers for this local demonstration.
     // Production applications should supply their own signing requirement.
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {
-                                            .signing_requirement = std::nullopt,
-                                            .expected_peer_uid = geteuid(),
-                                        },
-                                        .listener_parameters = {},
-                                    }));
-    server.listener_started.connect([&] {
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {
+                                              .signing_requirement = std::nullopt,
+                                              .expected_peer_uid = geteuid(),
+                                          },
+                                          .listener_parameters = {},
+                                      }));
+    listener.listener_started.connect([&] {
       finish_listener(true);
     });
 
-    server.listener_failed.connect([&](const auto& error) {
+    listener.listener_failed.connect([&](const auto& error) {
       std::cerr << "Listener failed: " << error.message() << '\n';
       finish_listener(false);
     });
-    server.error_occurred.connect([&](const auto&) {
+    listener.error_occurred.connect([&](const auto&) {
       std::cerr << "Server transport failed\n";
       finish_listener(false);
       finish(1);
     });
-    server.request_received.connect([&](auto, auto reply, auto data) {
-      server.async_reply(reply,
-                         data);
+    listener.request_received.connect([&](auto, auto reply, auto data) {
+      listener.async_reply(reply,
+                           data);
     });
-    server.async_start();
+    listener.async_start();
     if (listener_future.wait_for(5s) != std::future_status::ready ||
         !listener_future.get()) {
       std::cerr << "Listener did not start\n";
@@ -77,7 +77,7 @@ int main() {
                                           .expected_peer_uid = geteuid(),
                                       },
                                       .client_parameters = {
-                                          .endpoint = server.copy_endpoint(),
+                                          .endpoint = listener.copy_endpoint(),
                                       },
                                   }));
     client.error_occurred.connect([&](const auto&) {

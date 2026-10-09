@@ -86,14 +86,14 @@ std::string self_requirement() {
   return pqrs::cf::make_string(*string).value();
 }
 
-object start_listener(listener& server) {
+object start_listener(listener& listener) {
   // Wait for listener startup before handing its anonymous endpoint to a client.
   auto ready = std::make_shared<std::promise<void>>();
   auto future = ready->get_future();
-  auto connection = server.listener_started.connect([ready] {
+  auto connection = listener.listener_started.connect([ready] {
     ready->set_value();
   });
-  server.async_start();
+  listener.async_start();
 
   std::cerr << "Waiting for the listener to start...\n";
   if (future.wait_for(5s) != std::future_status::ready) {
@@ -102,7 +102,7 @@ object start_listener(listener& server) {
 
   connection.disconnect();
 
-  return server.copy_endpoint();
+  return listener.copy_endpoint();
 }
 } // namespace
 
@@ -173,18 +173,18 @@ int main() {
                 .validate());
 
     // Reject nonpositive reconnect intervals both during validation and construction.
-    auto client = client_options({
+    auto invalid_client_options = client_options({
         .common_parameters = {},
         .client_parameters = {
             .reconnect_interval = 0ms,
         },
     });
-    expect(!client.validate());
+    expect(!invalid_client_options.validate());
 
     bool client_rejected = false;
     try {
       pqrs::osx::xpc::client invalid(dispatcher,
-                                     client);
+                                     invalid_client_options);
     } catch (const std::invalid_argument&) {
       client_rejected = true;
     }
@@ -391,32 +391,32 @@ int main() {
 
   "request reply notifications peer uid and size limit"_test = [&] {
     // Connect peers that trust this executable and enforce a four-byte payload limit.
-    std::atomic<peer_id> server_peer{0}, client_peer{0};
+    std::atomic<peer_id> listener_peer{0}, client_peer{0};
     std::atomic<bool> uid_matches{false}, on_dispatcher{false}, notified{false};
     std::atomic<int> request_count{0}, completions{0};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {
-                                            .signing_requirement = self_requirement(),
-                                            .max_message_size = 4,
-                                        },
-                                        .listener_parameters = {},
-                                    }));
-    server.peer_ready.connect([&](auto id,
-                                  auto uid) {
-      server_peer = id;
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {
+                                              .signing_requirement = self_requirement(),
+                                              .max_message_size = 4,
+                                          },
+                                          .listener_parameters = {},
+                                      }));
+    listener.peer_ready.connect([&](auto id,
+                                    auto uid) {
+      listener_peer = id;
       uid_matches = uid == geteuid();
-      on_dispatcher = server.dispatcher_thread();
+      on_dispatcher = listener.dispatcher_thread();
     });
-    server.request_received.connect([&](auto id,
-                                        auto request,
-                                        auto data) {
+    listener.request_received.connect([&](auto id,
+                                          auto request,
+                                          auto data) {
       ++request_count;
-      server.async_reply(request,
-                         data);
-      server.async_send(id,
-                        std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{4, 3, 2, 1}));
+      listener.async_reply(request,
+                           data);
+      listener.async_send(id,
+                          std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{4, 3, 2, 1}));
     });
 
     pqrs::osx::xpc::client client(dispatcher,
@@ -427,7 +427,7 @@ int main() {
                                           .max_message_size = 4,
                                       },
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -443,7 +443,7 @@ int main() {
     client.async_start();
 
     expect(wait_for("both peers to become ready", [&] {
-      return client_peer != 0 && server_peer != 0;
+      return client_peer != 0 && listener_peer != 0;
     })) << fatal;
     expect(uid_matches.load());
     expect(on_dispatcher.load());
@@ -470,7 +470,7 @@ int main() {
         },
     });
 
-    // Verify dispatcher-thread completion, local size rejection, and only one request reaching the server.
+    // Verify dispatcher-thread completion, local size rejection, and only one request reaching the listener.
     expect(wait_for("both request completions and the notification", [&] {
       return completions == 2 && notified;
     }));
@@ -480,21 +480,21 @@ int main() {
   };
 
   "zero payload limit permits empty requests and rejects nonempty requests"_test = [&] {
-    // Connect an echo server and client that allow only empty payloads.
+    // Connect an echo listener and client that allow only empty payloads.
     std::atomic<peer_id> client_peer{0};
     std::atomic<int> completions{0}, requests{0};
     std::atomic<bool> empty_reply{false}, rejected{false};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .max_message_size = 0,
-                                    }));
-    server.request_received.connect([&](auto,
-                                        auto token,
-                                        auto data) {
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .max_message_size = 0,
+                                      }));
+    listener.request_received.connect([&](auto,
+                                          auto token,
+                                          auto data) {
       ++requests;
-      server.async_reply(token,
-                         data);
+      listener.async_reply(token,
+                           data);
     });
 
     pqrs::osx::xpc::client client(dispatcher,
@@ -503,7 +503,7 @@ int main() {
                                           .max_message_size = 0,
                                       },
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -535,7 +535,7 @@ int main() {
         },
     });
 
-    // Both completions must run, but only the empty request may reach the server.
+    // Both completions must run, but only the empty request may reach the listener.
     expect(wait_for("both payload-limit request completions", [&] {
       return completions == 2;
     })) << fatal;
@@ -549,15 +549,15 @@ int main() {
     std::atomic<peer_id> client_peer{0};
     std::atomic<bool> completed{false}, matches{false};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .max_message_size = std::nullopt,
-                                    }));
-    server.request_received.connect([&](auto,
-                                        auto token,
-                                        auto data) {
-      server.async_reply(token,
-                         data);
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .max_message_size = std::nullopt,
+                                      }));
+    listener.request_received.connect([&](auto,
+                                          auto token,
+                                          auto data) {
+      listener.async_reply(token,
+                           data);
     });
 
     pqrs::osx::xpc::client client(dispatcher,
@@ -566,7 +566,7 @@ int main() {
                                           .max_message_size = std::nullopt,
                                       },
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -605,19 +605,19 @@ int main() {
     std::atomic<bool> timed_out{false}, retried{false};
     std::optional<reply_token> unanswered;
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {},
-                                        .listener_parameters = {},
-                                    }));
-    server.request_received.connect([&](auto,
-                                        auto reply,
-                                        auto) {
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {},
+                                          .listener_parameters = {},
+                                      }));
+    listener.request_received.connect([&](auto,
+                                          auto reply,
+                                          auto) {
       if (!unanswered) {
         unanswered = reply;
       } else {
-        server.async_reply(reply,
-                           std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{42}));
+        listener.async_reply(reply,
+                             std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{42}));
       }
     });
 
@@ -629,7 +629,7 @@ int main() {
                                       },
                                       .client_parameters = {
                                           .reconnect_interval = 10ms,
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -669,9 +669,9 @@ int main() {
     expect(client_peer != original_peer);
 
     // Attempt a stale reply from the old session, then verify a new request gets only its own reply.
-    server.enqueue_to_dispatcher([&] {
-      server.async_reply(*unanswered,
-                         std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{99}));
+    listener.enqueue_to_dispatcher([&] {
+      listener.async_reply(*unanswered,
+                           std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{99}));
     });
 
     client.async_request({
@@ -691,25 +691,25 @@ int main() {
   };
 
   "oversized incoming payload is rejected before application dispatch"_test = [&] {
-    // Give the client a larger limit so it can send a payload the server must reject.
+    // Give the client a larger limit so it can send a payload the listener must reject.
     std::atomic<peer_id> client_peer{0};
     std::atomic<int> requests{0}, closed{0};
     std::atomic<bool> aborted{false};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {
-                                            .max_message_size = 4,
-                                        },
-                                        .listener_parameters = {},
-                                    }));
-    server.request_received.connect([&](auto,
-                                        auto,
-                                        auto) {
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {
+                                              .max_message_size = 4,
+                                          },
+                                          .listener_parameters = {},
+                                      }));
+    listener.request_received.connect([&](auto,
+                                          auto,
+                                          auto) {
       ++requests;
     });
-    server.peer_invalidated.connect([&](auto,
-                                        const auto&) {
+    listener.peer_invalidated.connect([&](auto,
+                                          const auto&) {
       ++closed;
     });
 
@@ -719,7 +719,7 @@ int main() {
                                           .max_message_size = 8,
                                       },
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -732,7 +732,7 @@ int main() {
       return client_peer != 0;
     })) << fatal;
 
-    // Send five bytes to the four-byte server and verify rejection before application dispatch.
+    // Send five bytes to the four-byte listener and verify rejection before application dispatch.
     client.async_request({
         .id = client_peer,
         .data = std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1, 2, 3, 4, 5}),
@@ -757,22 +757,22 @@ int main() {
     std::atomic<bool> first_matches{false}, second_matches{false};
     std::vector<reply_token> replies;
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {},
-                                        .listener_parameters = {},
-                                    }));
-    server.request_received.connect([&](auto,
-                                        auto reply,
-                                        auto) {
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {},
+                                          .listener_parameters = {},
+                                      }));
+    listener.request_received.connect([&](auto,
+                                          auto reply,
+                                          auto) {
       replies.push_back(reply);
       if (replies.size() == 2) {
-        server.async_reply(replies[1],
-                           std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{2}));
-        server.async_reply(replies[0],
-                           std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1}));
-        server.async_reply(replies[0],
-                           std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{99}));
+        listener.async_reply(replies[1],
+                             std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{2}));
+        listener.async_reply(replies[0],
+                             std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1}));
+        listener.async_reply(replies[0],
+                             std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{99}));
       }
     });
 
@@ -780,7 +780,7 @@ int main() {
                                   client_options({
                                       .common_parameters = {},
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -823,24 +823,24 @@ int main() {
 
   "reply tokens cannot be consumed by another transport with the same peer id"_test = [&] {
     // Use two transports with matching numeric peer IDs to test token ownership across transports.
-    std::atomic<peer_id> server_peer{0}, client_peer{0};
+    std::atomic<peer_id> listener_peer{0}, client_peer{0};
     std::atomic<bool> completed{false}, matches{false};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {},
-                                        .listener_parameters = {},
-                                    }));
-    server.peer_ready.connect([&](auto id,
-                                  auto) {
-      server_peer = id;
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {},
+                                          .listener_parameters = {},
+                                      }));
+    listener.peer_ready.connect([&](auto id,
+                                    auto) {
+      listener_peer = id;
     });
 
     pqrs::osx::xpc::client client(dispatcher,
                                   client_options({
                                       .common_parameters = {},
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -849,9 +849,9 @@ int main() {
     });
 
     // Try replying from the nonowning transport before the owning listener sends the valid reply.
-    server.request_received.connect([&](auto,
-                                        auto reply,
-                                        auto) {
+    listener.request_received.connect([&](auto,
+                                          auto reply,
+                                          auto) {
       client.async_reply(reply,
                          std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{99}));
 
@@ -864,8 +864,8 @@ int main() {
             expect(!result &&
                    result.error() == make_error_code(errc::not_ready));
 
-            server.async_reply(reply,
-                               std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{42}));
+            listener.async_reply(reply,
+                                 std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{42}));
           },
       });
     });
@@ -874,11 +874,11 @@ int main() {
     client.async_start();
 
     expect(wait_for("both token-ownership peers to become ready", [&] {
-      return server_peer != 0 &&
+      return listener_peer != 0 &&
              client_peer != 0;
     })) << fatal;
 
-    expect(server_peer.load() == client_peer.load()) << fatal;
+    expect(listener_peer.load() == client_peer.load()) << fatal;
 
     client.async_request({
         .id = client_peer,
@@ -903,17 +903,17 @@ int main() {
     std::atomic<int> requests{0}, interruptions{0}, completed{0};
     std::atomic<bool> discarded{false}, replied{false};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {},
-                                        .listener_parameters = {},
-                                    }));
-    server.request_received.connect([&](auto,
-                                        auto reply,
-                                        auto) {
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {},
+                                          .listener_parameters = {},
+                                      }));
+    listener.request_received.connect([&](auto,
+                                          auto reply,
+                                          auto) {
       if (++requests > 1) {
-        server.async_reply(reply,
-                           std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{7}));
+        listener.async_reply(reply,
+                             std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{7}));
       }
     });
 
@@ -921,7 +921,7 @@ int main() {
                                   client_options({
                                       .common_parameters = {},
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -978,11 +978,11 @@ int main() {
     // Require a signature that the listener cannot satisfy when returning the handshake reply.
     std::atomic<int> admitted{0}, rejected{0};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {},
-                                        .listener_parameters = {},
-                                    }));
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {},
+                                          .listener_parameters = {},
+                                      }));
 
     pqrs::osx::xpc::client client(
         dispatcher,
@@ -991,7 +991,7 @@ int main() {
                 .signing_requirement = "identifier \"org.pqrs.untrusted-never-match\"",
             },
             .client_parameters = {
-                .endpoint = start_listener(server),
+                .endpoint = start_listener(listener),
             },
         }));
     client.peer_ready.connect([&](auto,
@@ -1019,18 +1019,18 @@ int main() {
     // Require a UID different from the actual listener process UID.
     std::atomic<int> admitted{0}, failed{0};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {},
-                                        .listener_parameters = {},
-                                    }));
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {},
+                                          .listener_parameters = {},
+                                      }));
     pqrs::osx::xpc::client client(dispatcher,
                                   client_options({
                                       .common_parameters = {
                                           .expected_peer_uid = static_cast<uid_t>(geteuid() + 1),
                                       },
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto,
@@ -1059,7 +1059,7 @@ int main() {
     // Configure the listener to reject the connecting executable before accepting application traffic.
     std::atomic<int> admitted{0}, requests{0}, failed{0};
 
-    pqrs::osx::xpc::listener server(
+    pqrs::osx::xpc::listener listener(
         dispatcher,
         listener_options({
             .common_parameters = {
@@ -1067,13 +1067,13 @@ int main() {
             },
             .listener_parameters = {},
         }));
-    server.peer_ready.connect([&](auto,
-                                  const auto&) {
+    listener.peer_ready.connect([&](auto,
+                                    const auto&) {
       ++admitted;
     });
-    server.request_received.connect([&](auto,
-                                        auto,
-                                        auto) {
+    listener.request_received.connect([&](auto,
+                                          auto,
+                                          auto) {
       ++requests;
     });
 
@@ -1084,7 +1084,7 @@ int main() {
                                           .tick_interval = 20ms,
                                       },
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_invalidated.connect([&](auto,
@@ -1109,22 +1109,22 @@ int main() {
     // Provide a malformed signing requirement and observe listener startup signals.
     std::atomic<int> bound{0}, failed{0};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {
-                                            .signing_requirement = "not a valid requirement ???",
-                                        },
-                                        .listener_parameters = {},
-                                    }));
-    server.listener_started.connect([&] {
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {
+                                              .signing_requirement = "not a valid requirement ???",
+                                          },
+                                          .listener_parameters = {},
+                                      }));
+    listener.listener_started.connect([&] {
       ++bound;
     });
-    server.listener_failed.connect([&](const auto&) {
+    listener.listener_failed.connect([&](const auto&) {
       ++failed;
     });
 
     // Startup must fail rather than silently accepting connections without the requirement.
-    server.async_start();
+    listener.async_start();
 
     expect(wait_for("invalid signing requirement startup failure", [&] {
       return failed != 0;
@@ -1144,34 +1144,34 @@ int main() {
                                         .listener_parameters = {},
                                     }));
 
-    auto server = std::make_unique<listener>(dispatcher,
-                                             listener_options({
-                                                 .common_parameters = {},
-                                                 .listener_parameters = {},
-                                             }));
-    server->listener_started.connect([] {
+    auto listener = std::make_unique<pqrs::osx::xpc::listener>(dispatcher,
+                                                               listener_options({
+                                                                   .common_parameters = {},
+                                                                   .listener_parameters = {},
+                                                               }));
+    listener->listener_started.connect([] {
       throw std::runtime_error("listener callback failed");
     });
-    server->error_occurred.connect([&](const error_info& error) {
+    listener->error_occurred.connect([&](const error_info& error) {
       ++failures;
-      on_dispatcher = server->dispatcher_thread();
+      on_dispatcher = listener->dispatcher_thread();
       correct_error = error.code == make_error_code(errc::unexpected_exception) &&
                       error.message == "Unexpected XPC transport exception";
       parent.enqueue_to_dispatcher([&] {
-        server = std::make_unique<listener>(dispatcher,
-                                            listener_options({
-                                                .common_parameters = {},
-                                                .listener_parameters = {},
-                                            }));
-        server->listener_started.connect([&] {
+        listener = std::make_unique<pqrs::osx::xpc::listener>(dispatcher,
+                                                              listener_options({
+                                                                  .common_parameters = {},
+                                                                  .listener_parameters = {},
+                                                              }));
+        listener->listener_started.connect([&] {
           restarted = true;
         });
-        server->async_start();
+        listener->async_start();
       });
     });
 
     // Verify one terminal error on the dispatcher thread and successful deferred recreation.
-    server->async_start();
+    listener->async_start();
 
     expect(wait_for("the recreated listener to start", [&] {
       return restarted.load();
@@ -1188,23 +1188,23 @@ int main() {
     std::atomic<int> failures{0}, completions{0};
     std::atomic<bool> correct_error{false};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {},
-                                        .listener_parameters = {},
-                                    }));
-    server.request_received.connect([&](auto,
-                                        auto token,
-                                        auto data) {
-      server.async_reply(token,
-                         data);
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {},
+                                          .listener_parameters = {},
+                                      }));
+    listener.request_received.connect([&](auto,
+                                          auto token,
+                                          auto data) {
+      listener.async_reply(token,
+                           data);
     });
 
     pqrs::osx::xpc::client client(dispatcher,
                                   client_options({
                                       .common_parameters = {},
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -1295,16 +1295,16 @@ int main() {
     std::atomic<int> failures{0}, requests{0};
     std::atomic<bool> generic_error{false}, on_dispatcher{false};
 
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {
-                                            .tick_interval = 20ms,
-                                        },
-                                        .listener_parameters = {},
-                                    }));
-    server.request_received.connect([&](auto,
-                                        auto,
-                                        auto) {
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {
+                                              .tick_interval = 20ms,
+                                          },
+                                          .listener_parameters = {},
+                                      }));
+    listener.request_received.connect([&](auto,
+                                          auto,
+                                          auto) {
       ++requests;
     });
 
@@ -1314,7 +1314,7 @@ int main() {
                                           .tick_interval = 20ms,
                                       },
                                       .client_parameters = {
-                                          .endpoint = start_listener(server),
+                                          .endpoint = start_listener(listener),
                                       },
                                   }));
     client.peer_ready.connect([&](auto id,
@@ -1362,14 +1362,14 @@ int main() {
   // Exercise queued events/timers during destruction under AddressSanitizer.
   "shutdown while connection is starting"_test = [&] {
     // Keep a listener alive while repeatedly destroying clients immediately after starting them.
-    pqrs::osx::xpc::listener server(dispatcher,
-                                    listener_options({
-                                        .common_parameters = {
-                                            .tick_interval = 20ms,
-                                        },
-                                        .listener_parameters = {},
-                                    }));
-    auto endpoint = start_listener(server);
+    pqrs::osx::xpc::listener listener(dispatcher,
+                                      listener_options({
+                                          .common_parameters = {
+                                              .tick_interval = 20ms,
+                                          },
+                                          .listener_parameters = {},
+                                      }));
+    auto endpoint = start_listener(listener);
     for (int i = 0; i < 20; ++i) {
       pqrs::osx::xpc::client client(dispatcher,
                                     client_options({
