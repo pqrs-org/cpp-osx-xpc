@@ -10,9 +10,9 @@ A header-only asynchronous XPC byte transport for macOS.
 
 cpp-osx-xpc depends the following classes.
 
-- [Nod](https://github.com/fr00b0/nod),
-- [pqrs::dispatcher](https://github.com/pqrs-org/cpp-dispatcher), and
-- [pqrs::gsl](https://github.com/pqrs-org/cpp-gsl).
+- [Nod](https://github.com/fr00b0/nod)
+- [pqrs::dispatcher](https://github.com/pqrs-org/cpp-dispatcher)
+- [pqrs::gsl](https://github.com/pqrs-org/cpp-gsl)
 
 ## Install
 

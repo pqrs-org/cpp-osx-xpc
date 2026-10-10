@@ -1,12 +1,9 @@
-#include <Security/Security.h>
 #include <atomic>
 #include <boost/ut.hpp>
 #include <cerrno>
 #include <cstdint>
 #include <future>
 #include <iostream>
-#include <pqrs/cf/cf_ptr.hpp>
-#include <pqrs/cf/string.hpp>
 #include <pqrs/osx/xpc.hpp>
 #include <string_view>
 #include <thread>
@@ -56,34 +53,6 @@ bool wait_for(std::string_view description,
   }
 
   return true;
-}
-
-std::string self_requirement() {
-  // Use this executable's designated requirement so both test peers can authenticate each other.
-  SecCodeRef raw_code = nullptr;
-  if (SecCodeCopySelf(kSecCSDefaultFlags,
-                      &raw_code) != errSecSuccess) {
-    throw std::runtime_error("cannot identify test process");
-  }
-
-  auto code = pqrs::cf::adopt_cf_ptr(raw_code);
-  SecRequirementRef raw_requirement = nullptr;
-  if (SecCodeCopyDesignatedRequirement(*code,
-                                       kSecCSDefaultFlags,
-                                       &raw_requirement) != errSecSuccess) {
-    throw std::runtime_error("cannot obtain test signature requirement");
-  }
-
-  auto requirement = pqrs::cf::adopt_cf_ptr(raw_requirement);
-  CFStringRef raw_string = nullptr;
-  if (SecRequirementCopyString(*requirement,
-                               kSecCSDefaultFlags,
-                               &raw_string) != errSecSuccess) {
-    throw std::runtime_error("cannot serialize test signature requirement");
-  }
-
-  auto string = pqrs::cf::adopt_cf_ptr(raw_string);
-  return pqrs::cf::make_string(*string).value();
 }
 
 object start_listener(listener& listener) {
@@ -428,15 +397,12 @@ int main() {
   };
 
   "request replies and notifications preserve dispatcher execution"_test = [&] {
-    // Connect peers that trust this executable.
     std::atomic<peer_id> listener_peer{0}, client_peer{0};
     std::atomic<bool> on_dispatcher{false}, notified{false};
 
     pqrs::osx::xpc::listener listener(dispatcher,
                                       listener_options({
-                                          .common_parameters = {
-                                              .signing_requirement = self_requirement(),
-                                          },
+                                          .common_parameters = {},
                                           .listener_parameters = {},
                                       }));
     listener.peer_ready.connect([&](auto id) {
@@ -454,9 +420,7 @@ int main() {
 
     pqrs::osx::xpc::client client(dispatcher,
                                   client_options({
-                                      .common_parameters = {
-                                          .signing_requirement = self_requirement(),
-                                      },
+                                      .common_parameters = {},
                                       .client_parameters = {
                                           .endpoint = start_listener(listener),
                                       },
