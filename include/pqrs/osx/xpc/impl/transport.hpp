@@ -270,11 +270,11 @@ private:
 
   void stop_on_unexpected_exception() noexcept {
     try {
-      if (failure_stopped_) {
+      if (stopped_) {
         return;
       }
 
-      failure_stopped_ = true;
+      stopped_ = true;
       failed_->store(true);
       // Stop potentially partially updated state without replaying messages.
       listener_.cancel();
@@ -812,8 +812,7 @@ const Options options_;
 dispatch_queue_t queue_{nullptr};
 pqrs::not_null_shared_ptr_t<bool> alive_{std::make_shared<bool>(true)}; // only accessed on queue_
 pqrs::not_null_shared_ptr_t<std::atomic<bool>> failed_{std::make_shared<std::atomic<bool>>(false)};
-bool failure_stopped_{false}; // only accessed on queue_
-bool stopped_{false};         // only accessed on queue_; set after a terminal startup failure
+bool stopped_{false}; // only accessed on queue_; set after a terminal startup failure
 bool started_{false};
 connection listener_;
 peers peers_;
