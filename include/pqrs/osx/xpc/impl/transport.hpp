@@ -408,9 +408,19 @@ private:
     if constexpr (is_listener()) {
       listener_ = connection::create_listener(options_,
                                               queue_);
-      if (!listener_.get() ||
-          !apply_peer_signing_requirement(listener_)) {
+      if (!listener_.get()) {
+        stopped_ = true;
+
+        enqueue_notification([this] {
+          listener_failed(make_error_code(errc::connection_invalid));
+        });
+
+        return;
+      }
+
+      if (!apply_peer_signing_requirement(listener_)) {
         listener_.cancel();
+        stopped_ = true;
 
         enqueue_notification([this] {
           listener_failed(make_error_code(errc::invalid_signing_requirement));
@@ -447,13 +457,19 @@ private:
     } else {
       auto connection = connection::create_client(options_,
                                                   queue_);
-      if (!connection.get() ||
-          !add_peer(std::move(connection))) {
+      if (!connection.get()) {
         enqueue_notification([this] {
-          connection_failed(make_error_code(errc::invalid_signing_requirement));
+          connection_failed(make_error_code(errc::connection_invalid));
         });
 
         reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
+
+      } else if (!add_peer(std::move(connection))) {
+        stopped_ = true;
+
+        enqueue_notification([this] {
+          connection_failed(make_error_code(errc::invalid_signing_requirement));
+        });
       }
     }
   }
@@ -761,15 +777,17 @@ void tick() noexcept {
                  errc::request_timeout);
     }
 
-    if (!is_listener() &&
+    if (!stopped_ &&
+        !is_listener() &&
         peers_.empty() &&
         now >= reconnect_at_) {
       start();
     }
   });
 
-  // Stop the timer chain after terminal failure, including failure during this tick.
-  if (failed_->load()) {
+  // tick can stop during its work. Do not reserve another timer in that case.
+  if (stopped_ ||
+      failed_->load()) {
     return;
   }
 
@@ -795,6 +813,7 @@ dispatch_queue_t queue_{nullptr};
 pqrs::not_null_shared_ptr_t<bool> alive_{std::make_shared<bool>(true)}; // only accessed on queue_
 pqrs::not_null_shared_ptr_t<std::atomic<bool>> failed_{std::make_shared<std::atomic<bool>>(false)};
 bool failure_stopped_{false}; // only accessed on queue_
+bool stopped_{false};         // only accessed on queue_; set after a terminal startup failure
 bool started_{false};
 connection listener_;
 peers peers_;

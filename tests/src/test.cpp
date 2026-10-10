@@ -1079,6 +1079,56 @@ int main() {
     expect(bound == 0);
   };
 
+  "invalid client signature requirement fails without retrying"_test = [&] {
+    std::atomic<int> failures{0}, completions{0};
+    std::atomic<bool> not_ready{false};
+
+    pqrs::osx::xpc::listener listener(dispatcher);
+    pqrs::osx::xpc::client client(
+        dispatcher,
+        client_options({
+            .common_parameters = {
+                .signing_requirement = "not a valid requirement ???",
+                .tick_interval = 20ms,
+            },
+            .client_parameters = {
+                .reconnect_interval = 20ms,
+                .endpoint = start_listener(listener),
+            },
+        }));
+    client.connection_failed.connect([&](const auto& error) {
+      expect(error == make_error_code(errc::invalid_signing_requirement));
+      ++failures;
+    });
+
+    client.async_start();
+
+    expect(wait_for("invalid client signing requirement startup failure", [&] {
+      return failures != 0;
+    })) << fatal;
+
+    // A terminal startup failure stops retries, but must not discard a later request completion.
+    client.async_request({
+        .id = 1,
+        .data = std::make_shared<const std::vector<uint8_t>>(),
+        .completion = [&](auto result) {
+          not_ready = !result &&
+                      result.error() == make_error_code(errc::not_ready);
+          ++completions;
+        },
+    });
+
+    expect(wait_for("the stopped client request completion", [&] {
+      return completions != 0;
+    })) << fatal;
+
+    expect(not_ready.load());
+    expect(completions == 1);
+
+    std::this_thread::sleep_for(100ms);
+    expect(failures == 1);
+  };
+
   "signal exceptions report a terminal failure and allow deferred recreation"_test = [&] {
     // Throw from listener_started and recreate the failed listener in a later dispatcher task.
     std::atomic<int> failures{0};
