@@ -638,186 +638,187 @@ private:
         });
 
     auto alive = alive_;
-    auto sent = peer->get_connection().send_message_with_reply({
+    connection::send_message_with_reply_parameters send_message_parameters{
         .message = parameters.message,
         .queue = queue_,
-        .handler = ^(xpc_object_t event) {
-                if (!*alive) {
-                  return;
-  }
-
-  run_guarded([&] {
-    auto found_peer = peers_.find(id);
-    if (!found_peer) {
-      return;
-    }
-
-    auto request_state = found_peer->take_pending_request(request);
-    if (!request_state) {
-      return;
-    }
-
-    auto data = read_message(event,
-                             request_state->handshake
-                                 ? message_type::hello_reply
-                                 : message_type::data);
-    if (!data) {
-      // A reply error describes this request, not necessarily the connection.
-      // Only the connection event handler emits peer_interrupted.
-      complete(request_state->completion,
-               std::unexpected(make_error_code(data.error())));
-
-      if (request_state->handshake &&
-          data.error() == errc::connection_interrupted) {
-        // XPC can reuse this connection. Retry the probe without replacing it.
-        found_peer->schedule_handshake_retry(std::chrono::steady_clock::now() + reconnect_interval());
-
-        auto error = make_error_code(data.error());
-        enqueue_notification([this, error] {
-          connection_failed(error);
-        });
-
-      } else if (request_state->handshake ||
-                 xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
-        invalidate(id,
-                   data.error());
+    };
+    // Assign the Block separately because clang-format misformats a Block in a designated initializer.
+    send_message_parameters.handler = ^(xpc_object_t event) {
+      if (!*alive) {
+        return;
       }
 
-      return;
-    }
-
-    if (request_state->handshake) {
-      mark_ready_for_communication(id,
-                                   *found_peer);
-    } else {
-      complete(request_state->completion,
-               pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>>(data->data));
-    }
-  });
-},
-} // namespace pqrs::osx::xpc::impl
-);
-if (!sent) {
-  // Invalidation consumes pending requests and reports their failure immediately.
-  invalidate(id,
-             errc::connection_invalid);
-}
-}
-
-void complete(completion callback,
-              std::expected<pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>>, std::error_code> result) {
-  if (callback) {
-    enqueue_notification([callback, result] {
-      callback(result);
-    });
-  }
-}
-
-void fail_all_pending_requests(peer& peer,
-                               errc error) {
-  for (const auto& [id, request] : peer.take_pending_requests()) {
-    complete(request.completion,
-             std::unexpected(make_error_code(error)));
-  }
-}
-
-void handle_failure(peer_id id,
-                    errc error) {
-  if (error != errc::connection_interrupted) {
-    invalidate(id,
-               error);
-    return;
-  }
-
-  auto peer = peers_.find(id);
-  if (!peer ||
-      !peer->mark_connection_interrupted(std::chrono::steady_clock::now() + reconnect_interval())) {
-    return;
-  }
-
-  fail_all_pending_requests(*peer,
-                            error);
-  enqueue_notification([this, id] {
-    peer_interrupted(id);
-  });
-}
-
-void invalidate(peer_id id,
-                errc reason) {
-  if (auto found_peer = peers_.find(id); found_peer) {
-    fail_all_pending_requests(*found_peer,
-                              reason);
-
-    peers_.erase(id);
-
-    auto error = make_error_code(reason);
-    enqueue_notification([this, id, error] {
-      peer_invalidated(id,
-                       error);
-    });
-
-    if (!is_listener()) {
-      reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
-    }
-  }
-}
-
-void tick() noexcept {
-  run_guarded([&] {
-    auto now = std::chrono::steady_clock::now();
-    auto actions = peers_.collect_tick_actions(now);
-    if (!is_listener()) {
-      for (auto id : actions.handshake_retry_target_peer_ids) {
-        begin_handshake(id);
-      }
-    }
-
-    for (auto id : actions.expired_peer_ids) {
-      invalidate(id,
-                 errc::request_timeout);
-    }
-
-    if (!stopped_ &&
-        !is_listener() &&
-        peers_.empty() &&
-        now >= reconnect_at_) {
-      start();
-    }
-  });
-
-  // tick can stop during its work. Do not reserve another timer in that case.
-  if (stopped_ ||
-      failed_->load()) {
-    return;
-  }
-
-  auto alive = alive_;
-  dispatch_after(
-      dispatch_time(DISPATCH_TIME_NOW,
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        options_.common_parameters.tick_interval)
-                        .count()),
-      queue_,
-      ^{
-        if (!*alive) {
+      run_guarded([&] {
+        auto found_peer = peers_.find(id);
+        if (!found_peer) {
           return;
         }
 
-        tick();
+        auto request_state = found_peer->take_pending_request(request);
+        if (!request_state) {
+          return;
+        }
+
+        auto data = read_message(event,
+                                 request_state->handshake
+                                     ? message_type::hello_reply
+                                     : message_type::data);
+        if (!data) {
+          // A reply error describes this request, not necessarily the connection.
+          // Only the connection event handler emits peer_interrupted.
+          complete(request_state->completion,
+                   std::unexpected(make_error_code(data.error())));
+
+          if (request_state->handshake &&
+              data.error() == errc::connection_interrupted) {
+            // XPC can reuse this connection. Retry the probe without replacing it.
+            found_peer->schedule_handshake_retry(std::chrono::steady_clock::now() + reconnect_interval());
+
+            auto error = make_error_code(data.error());
+            enqueue_notification([this, error] {
+              connection_failed(error);
+            });
+
+          } else if (request_state->handshake ||
+                     xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
+            invalidate(id,
+                       data.error());
+          }
+
+          return;
+        }
+
+        if (request_state->handshake) {
+          mark_ready_for_communication(id,
+                                       *found_peer);
+        } else {
+          complete(request_state->completion,
+                   pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>>(data->data));
+        }
       });
-}
+    };
 
-const Options options_;
+    auto sent = peer->get_connection().send_message_with_reply(send_message_parameters);
+    if (!sent) {
+      // Invalidation consumes pending requests and reports their failure immediately.
+      invalidate(id,
+                 errc::connection_invalid);
+    }
+  }
 
-dispatch_queue_t queue_{nullptr};
-pqrs::not_null_shared_ptr_t<bool> alive_{std::make_shared<bool>(true)}; // only accessed on queue_
-pqrs::not_null_shared_ptr_t<std::atomic<bool>> failed_{std::make_shared<std::atomic<bool>>(false)};
-bool stopped_{false}; // only accessed on queue_; set after a terminal startup failure
-bool started_{false};
-connection listener_;
-peers peers_;
-uint64_t next_request_id_{0};
-std::chrono::steady_clock::time_point reconnect_at_{};
-}
-;
+  void complete(completion callback,
+                std::expected<pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>>, std::error_code> result) {
+    if (callback) {
+      enqueue_notification([callback, result] {
+        callback(result);
+      });
+    }
+  }
+
+  void fail_all_pending_requests(peer& peer,
+                                 errc error) {
+    for (const auto& [id, request] : peer.take_pending_requests()) {
+      complete(request.completion,
+               std::unexpected(make_error_code(error)));
+    }
+  }
+
+  void handle_failure(peer_id id,
+                      errc error) {
+    if (error != errc::connection_interrupted) {
+      invalidate(id,
+                 error);
+      return;
+    }
+
+    auto peer = peers_.find(id);
+    if (!peer ||
+        !peer->mark_connection_interrupted(std::chrono::steady_clock::now() + reconnect_interval())) {
+      return;
+    }
+
+    fail_all_pending_requests(*peer,
+                              error);
+    enqueue_notification([this, id] {
+      peer_interrupted(id);
+    });
+  }
+
+  void invalidate(peer_id id,
+                  errc reason) {
+    if (auto found_peer = peers_.find(id); found_peer) {
+      fail_all_pending_requests(*found_peer,
+                                reason);
+
+      peers_.erase(id);
+
+      auto error = make_error_code(reason);
+      enqueue_notification([this, id, error] {
+        peer_invalidated(id,
+                         error);
+      });
+
+      if (!is_listener()) {
+        reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
+      }
+    }
+  }
+
+  void tick() noexcept {
+    run_guarded([&] {
+      auto now = std::chrono::steady_clock::now();
+      auto actions = peers_.collect_tick_actions(now);
+      if (!is_listener()) {
+        for (auto id : actions.handshake_retry_target_peer_ids) {
+          begin_handshake(id);
+        }
+      }
+
+      for (auto id : actions.expired_peer_ids) {
+        invalidate(id,
+                   errc::request_timeout);
+      }
+
+      if (!stopped_ &&
+          !is_listener() &&
+          peers_.empty() &&
+          now >= reconnect_at_) {
+        start();
+      }
+    });
+
+    // tick can stop during its work. Do not reserve another timer in that case.
+    if (stopped_ ||
+        failed_->load()) {
+      return;
+    }
+
+    auto alive = alive_;
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW,
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          options_.common_parameters.tick_interval)
+                          .count()),
+        queue_,
+        ^{
+          if (!*alive) {
+            return;
+          }
+
+          tick();
+        });
+  }
+
+  const Options options_;
+
+  dispatch_queue_t queue_{nullptr};
+  pqrs::not_null_shared_ptr_t<bool> alive_{std::make_shared<bool>(true)}; // only accessed on queue_
+  pqrs::not_null_shared_ptr_t<std::atomic<bool>> failed_{std::make_shared<std::atomic<bool>>(false)};
+  bool stopped_{false}; // only accessed on queue_; set after a terminal startup failure
+  bool started_{false};
+  connection listener_;
+  peers peers_;
+  uint64_t next_request_id_{0};
+  std::chrono::steady_clock::time_point reconnect_at_{};
+};
 } // namespace pqrs::osx::xpc::impl
