@@ -15,6 +15,9 @@ namespace pqrs::osx::xpc {
 
 // Owns peer connections and allocates IDs that are not reused after removal.
 // Reuse after uint64_t wraparound is intentionally permitted.
+// Peer count is intentionally unlimited. In normal production use, a signing
+// requirement restricts admission to trusted processes and limits untrusted
+// processes from consuming peer resources.
 // All operations and access to returned peers must run on the transport queue.
 class peers final {
 public:
