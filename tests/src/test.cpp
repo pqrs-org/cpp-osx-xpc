@@ -976,8 +976,10 @@ int main() {
         client_options({
             .common_parameters = {
                 .signing_requirement = "identifier \"org.pqrs.untrusted-never-match\"",
+                .tick_interval = 20ms,
             },
             .client_parameters = {
+                .reconnect_interval = 20ms,
                 .endpoint = start_listener(listener),
             },
         }));
@@ -991,7 +993,7 @@ int main() {
       }
     });
 
-    // Verify signature rejection is reported and the client never admits the peer.
+    // Verify signature rejection is reported once and the client never admits the peer.
     client.async_start();
 
     expect(wait_for("handshake signature rejection", [&] {
@@ -999,6 +1001,10 @@ int main() {
     }));
 
     expect(admitted == 0);
+
+    // The short retry interval above would produce more rejections unless signature rejection stops the client.
+    std::this_thread::sleep_for(100ms);
+    expect(rejected == 1);
   };
 
   "signature requirement rejects a peer before application messages"_test = [&] {

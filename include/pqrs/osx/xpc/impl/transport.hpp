@@ -627,6 +627,7 @@ private:
       return;
     }
 
+    // Request ID wraparound is intentionally permitted.
     auto request = ++next_request_id_;
 
     peer->add_pending_request(
@@ -679,10 +680,19 @@ private:
               connection_failed(error);
             });
 
-          } else if (request_state->handshake ||
-                     xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
-            invalidate(id,
-                       data.error());
+          } else {
+            if constexpr (!is_listener()) {
+              if (data.error() == errc::signature_rejected) {
+                // A client-side signing requirement cannot become satisfied by retrying.
+                stopped_ = true;
+              }
+            }
+
+            if (request_state->handshake ||
+                xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
+              invalidate(id,
+                         data.error());
+            }
           }
 
           return;
@@ -814,7 +824,7 @@ private:
   dispatch_queue_t queue_{nullptr};
   pqrs::not_null_shared_ptr_t<bool> alive_{std::make_shared<bool>(true)}; // only accessed on queue_
   pqrs::not_null_shared_ptr_t<std::atomic<bool>> failed_{std::make_shared<std::atomic<bool>>(false)};
-  bool stopped_{false}; // only accessed on queue_; set after a terminal startup failure
+  bool stopped_{false}; // only accessed on queue_; set after a terminal failure
   bool started_{false};
   connection listener_;
   peers peers_;

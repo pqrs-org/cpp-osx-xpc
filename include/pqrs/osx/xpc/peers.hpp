@@ -14,10 +14,12 @@
 namespace pqrs::osx::xpc {
 
 // Owns peer connections and allocates IDs that are not reused after removal.
+// Reuse after uint64_t wraparound is intentionally permitted.
 // All operations and access to returned peers must run on the transport queue.
 class peers final {
 public:
   std::pair<peer_id, peer&> add(connection connection) {
+    // Peer ID wraparound is intentionally permitted.
     auto id = ++next_peer_id_;
     auto [it, inserted] = peers_.try_emplace(id,
                                              std::move(connection));
