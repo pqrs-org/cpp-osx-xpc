@@ -428,60 +428,66 @@ private:
 
   void start() {
     if constexpr (is_listener()) {
-      listener_ = connection::create_listener(options_,
-                                              queue_);
-      if (!listener_.get()) {
-        terminate_listener(make_error_code(errc::connection_invalid));
+      start_listener();
+    } else {
+      start_client();
+    }
+  }
 
-        return;
-      }
+  void start_listener() {
+    listener_ = connection::create_listener(options_,
+                                            queue_);
+    if (!listener_.get()) {
+      terminate_listener(make_error_code(errc::connection_invalid));
+      return;
+    }
 
-      if (!apply_peer_signing_requirement(listener_)) {
-        terminate_listener(make_error_code(errc::invalid_signing_requirement));
+    if (!apply_peer_signing_requirement(listener_)) {
+      terminate_listener(make_error_code(errc::invalid_signing_requirement));
+      return;
+    }
 
-        return;
-      }
+    auto alive = alive_;
+    listener_.set_event_handler(
+        ^(xpc_object_t event) {
+          if (!*alive) {
+            return;
+          }
 
-      auto alive = alive_;
-      listener_.set_event_handler(
-          ^(xpc_object_t event) {
-            if (!*alive) {
-              return;
+          run_guarded([&] {
+            if (xpc_get_type(event) == XPC_TYPE_CONNECTION) {
+              add_peer(connection::from_peer(static_cast<xpc_connection_t>(event)));
+            } else {
+              terminate_listener(make_error_code(connection_error(event)));
             }
-
-            run_guarded([&] {
-              if (xpc_get_type(event) == XPC_TYPE_CONNECTION) {
-                add_peer(connection::from_peer(static_cast<xpc_connection_t>(event)));
-              } else {
-                auto error = make_error_code(connection_error(event));
-                terminate_listener(error);
-              }
-            });
           });
+        });
 
-      listener_.resume();
+    listener_.resume();
 
+    enqueue_notification([this] {
+      listener_started();
+    });
+  }
+
+  void start_client() {
+    auto connection = connection::create_client(options_,
+                                                queue_);
+    if (!connection.get()) {
       enqueue_notification([this] {
-        listener_started();
+        connection_failed(make_error_code(errc::connection_invalid));
       });
 
-    } else {
-      auto connection = connection::create_client(options_,
-                                                  queue_);
-      if (!connection.get()) {
-        enqueue_notification([this] {
-          connection_failed(make_error_code(errc::connection_invalid));
-        });
+      reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
+      return;
+    }
 
-        reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
+    if (!add_peer(std::move(connection))) {
+      stopped_ = true;
 
-      } else if (!add_peer(std::move(connection))) {
-        stopped_ = true;
-
-        enqueue_notification([this] {
-          connection_failed(make_error_code(errc::invalid_signing_requirement));
-        });
-      }
+      enqueue_notification([this] {
+        connection_failed(make_error_code(errc::invalid_signing_requirement));
+      });
     }
   }
 
@@ -565,57 +571,74 @@ private:
 
     auto reply = create_reply(event);
     if (data->type == message_type::hello) {
-      if (!is_listener() ||
-          !reply) {
+      handle_hello(id,
+                   *found_peer,
+                   std::move(reply));
+    } else {
+      handle_application_message(id,
+                                 *found_peer,
+                                 std::move(reply),
+                                 data->data);
+    }
+  }
+
+  void handle_hello(peer_id id,
+                    peer& peer,
+                    std::optional<dictionary> reply) {
+    if (!is_listener() ||
+        !reply) {
+      invalidate(id,
+                 errc::invalid_message);
+      return;
+    }
+
+    mark_ready_for_communication(id,
+                                 peer);
+    reply->set_uint64(type_key,
+                      static_cast<uint64_t>(message_type::hello_reply));
+
+    if (!peer.get_connection().send_message(*reply)) {
+      invalidate(id,
+                 errc::connection_invalid);
+    }
+  }
+
+  void handle_application_message(peer_id id,
+                                  peer& peer,
+                                  std::optional<dictionary> reply,
+                                  std::shared_ptr<const std::vector<uint8_t>> data) {
+    // Reply handlers and event handlers have no cross-handler ordering guarantee.
+    // Any authenticated message from the server establishes its identity, even
+    // if a notification is dispatched before the handshake reply handler.
+    if (!peer.ready_for_communication()) {
+      if (is_listener()) {
         invalidate(id,
-                   errc::invalid_message);
+                   errc::not_ready);
         return;
       }
 
       mark_ready_for_communication(id,
-                                   *found_peer);
-      reply->set_uint64(type_key,
-                        static_cast<uint64_t>(message_type::hello_reply));
+                                   peer);
+    }
 
-      if (!found_peer->get_connection().send_message(*reply)) {
-        invalidate(id,
-                   errc::connection_invalid);
-      }
+    if (reply) {
+      auto token = reply_token(reply_token::state{
+          .reply_dictionary = std::move(*reply),
+          .peer = id,
+          .session = peer.get_session(),
+      });
+
+      enqueue_notification([this, id, token, data] {
+        request_received(id,
+                         token,
+                         data);
+      });
 
     } else {
-      // Reply handlers and event handlers have no cross-handler ordering guarantee.
-      // Any authenticated message from the server establishes its identity, even
-      // if a notification is dispatched before the handshake reply handler.
-      if (!found_peer->ready_for_communication()) {
-        if (is_listener()) {
-          invalidate(id,
-                     errc::not_ready);
-          return;
-        }
-
-        mark_ready_for_communication(id,
-                                     *found_peer);
-      }
-
-      if (reply) {
-        auto token = reply_token(reply_token::state{
-            .reply_dictionary = std::move(*reply),
-            .peer = id,
-            .session = found_peer->get_session(),
-        });
-
-        enqueue_notification([this, id, token, data = data->data] {
-          request_received(id,
-                           token,
-                           data);
-        });
-
-      } else {
-        enqueue_notification([this, id, data = data->data] {
-          message_received(id,
-                           data);
-        });
-      }
+      enqueue_notification([this, id, data] {
+        message_received(id,
+                         data);
+      });
     }
   }
 
