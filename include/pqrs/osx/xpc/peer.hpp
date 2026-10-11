@@ -73,10 +73,6 @@ public:
     return session.lock() == session_.get();
   }
 
-  void schedule_handshake_retry(std::chrono::steady_clock::time_point handshake_retry_at) noexcept {
-    handshake_retry_at_ = handshake_retry_at;
-  }
-
   [[nodiscard]] bool can_retry_handshake(std::chrono::steady_clock::time_point now) const noexcept {
     return !ready_for_communication_ &&
            pending_requests_.empty() &&
