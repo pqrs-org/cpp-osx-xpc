@@ -46,6 +46,8 @@ public:
   // Terminal listener failure. This transport cannot be started again; its
   // owner must defer destruction and create a replacement listener.
   nod::signal<void(const std::error_code&)> listener_terminated;
+  // The client could not establish or re-establish a ready peer session.
+  // peer_invalidated is also emitted when a created peer is invalidated.
   nod::signal<void(const std::error_code&)> connection_failed;
   nod::signal<void(peer_id)> peer_ready;
   nod::signal<void(peer_id)> peer_interrupted;
@@ -129,7 +131,9 @@ public:
         queue_,
         ^{
           run_guarded([&] {
-            if (auto peer = peers_.find(id); peer && peer->ready_for_communication()) {
+            if (auto peer = peers_.find(id);
+                peer &&
+                peer->ready_for_communication()) {
               if (options_.common_parameters.max_message_size &&
                   data->size() > *options_.common_parameters.max_message_size) {
                 invalidate(id,
@@ -159,7 +163,8 @@ public:
         ^{
           run_guarded([&] {
             auto peer = peers_.find(parameters.id);
-            if (!peer || !peer->ready_for_communication()) {
+            if (!peer ||
+                !peer->ready_for_communication()) {
               complete(parameters.completion,
                        std::unexpected(make_error_code(errc::not_ready)));
 
@@ -237,6 +242,11 @@ private:
     hello = 1,
     hello_reply,
     data,
+  };
+
+  enum class peer_failure_action {
+    interrupt,
+    invalidate,
   };
 
   static constexpr char type_key[]{"type"};
@@ -674,12 +684,9 @@ private:
           if (request_state->handshake &&
               data.error() == errc::connection_interrupted) {
             // XPC can reuse this connection. Retry the probe without replacing it.
-            found_peer->schedule_handshake_retry(std::chrono::steady_clock::now() + reconnect_interval());
-
-            auto error = make_error_code(data.error());
-            enqueue_notification([this, error] {
-              connection_failed(error);
-            });
+            fail_peer(id,
+                      data.error(),
+                      peer_failure_action::interrupt);
 
           } else {
             if constexpr (!is_listener()) {
@@ -736,41 +743,61 @@ private:
 
   void handle_failure(peer_id id,
                       errc error) {
-    if (error != errc::connection_interrupted) {
-      invalidate(id,
-                 error);
-      return;
-    }
-
-    auto peer = peers_.find(id);
-    if (!peer ||
-        !peer->mark_connection_interrupted(std::chrono::steady_clock::now() + reconnect_interval())) {
-      return;
-    }
-
-    fail_all_pending_requests(*peer,
-                              error);
-    enqueue_notification([this, id] {
-      peer_interrupted(id);
-    });
+    fail_peer(id,
+              error,
+              error == errc::connection_interrupted
+                  ? peer_failure_action::interrupt
+                  : peer_failure_action::invalidate);
   }
 
   void invalidate(peer_id id,
                   errc reason) {
+    fail_peer(id,
+              reason,
+              peer_failure_action::invalidate);
+  }
+
+  void fail_peer(peer_id id,
+                 errc reason,
+                 peer_failure_action action) {
     if (auto found_peer = peers_.find(id); found_peer) {
+      auto was_ready_for_communication = found_peer->ready_for_communication();
+
+      if (action == peer_failure_action::interrupt &&
+          !found_peer->mark_connection_interrupted(std::chrono::steady_clock::now() + reconnect_interval())) {
+        return;
+      }
+
       fail_all_pending_requests(*found_peer,
                                 reason);
 
-      peers_.erase(id);
+      if (action == peer_failure_action::invalidate) {
+        peers_.erase(id);
+      }
 
       auto error = make_error_code(reason);
-      enqueue_notification([this, id, error] {
-        peer_invalidated(id,
-                         error);
-      });
+      if constexpr (!is_listener()) {
+        if (!was_ready_for_communication) {
+          enqueue_notification([this, error] {
+            connection_failed(error);
+          });
+        }
+      }
 
-      if (!is_listener()) {
-        reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
+      if (action == peer_failure_action::interrupt) {
+        enqueue_notification([this, id] {
+          peer_interrupted(id);
+        });
+
+      } else {
+        enqueue_notification([this, id, error] {
+          peer_invalidated(id,
+                           error);
+        });
+
+        if (!is_listener()) {
+          reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
+        }
       }
     }
   }

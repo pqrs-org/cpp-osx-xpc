@@ -963,7 +963,7 @@ int main() {
 
   "client verifies the signature of native handshake replies"_test = [&] {
     // Require a signature that the listener cannot satisfy when returning the handshake reply.
-    std::atomic<int> admitted{0}, rejected{0};
+    std::atomic<int> admitted{0}, connection_failures{0}, rejected{0};
 
     pqrs::osx::xpc::listener listener(dispatcher,
                                       listener_options({
@@ -986,6 +986,11 @@ int main() {
     client.peer_ready.connect([&](auto) {
       ++admitted;
     });
+    client.connection_failed.connect([&](const auto& error) {
+      if (error == make_error_code(errc::signature_rejected)) {
+        ++connection_failures;
+      }
+    });
     client.peer_invalidated.connect([&](auto,
                                         const auto& error) {
       if (error == make_error_code(errc::signature_rejected)) {
@@ -997,19 +1002,21 @@ int main() {
     client.async_start();
 
     expect(wait_for("handshake signature rejection", [&] {
-      return rejected != 0;
+      return connection_failures != 0 &&
+             rejected != 0;
     }));
 
     expect(admitted == 0);
 
     // The short retry interval above would produce more rejections unless signature rejection stops the client.
     std::this_thread::sleep_for(100ms);
+    expect(connection_failures == 1);
     expect(rejected == 1);
   };
 
   "signature requirement rejects a peer before application messages"_test = [&] {
     // Configure the listener to reject the connecting executable before accepting application traffic.
-    std::atomic<int> admitted{0}, requests{0}, failed{0};
+    std::atomic<int> admitted{0}, requests{0}, connection_failures{0};
 
     pqrs::osx::xpc::listener listener(
         dispatcher,
@@ -1038,23 +1045,20 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_invalidated.connect([&](auto,
-                                        const auto&) {
-      ++failed;
-    });
     client.connection_failed.connect([&](const auto&) {
-      ++failed;
+      ++connection_failures;
     });
 
     // Verify the client observes failure and the listener admits no peer or request.
     client.async_start();
 
     expect(wait_for("listener signature rejection", [&] {
-      return failed != 0;
+      return connection_failures != 0;
     }));
 
     expect(admitted == 0);
     expect(requests == 0);
+    expect(connection_failures == 1);
   };
 
   "invalid signature requirement fails closed"_test = [&] {
