@@ -48,8 +48,8 @@ int main() {
       finish_listener(true);
     });
 
-    listener.listener_failed.connect([&](const auto& error) {
-      std::cerr << "Listener failed: " << error.message() << '\n';
+    listener.listener_terminated.connect([&](const auto& error) {
+      std::cerr << "Listener terminated; recreate it to retry: " << error.message() << '\n';
       finish_listener(false);
     });
     listener.error_occurred.connect([&](const auto&) {

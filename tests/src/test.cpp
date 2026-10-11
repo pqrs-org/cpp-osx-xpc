@@ -18,7 +18,7 @@ template <typename T>
 concept has_listener_api = requires(T& value) {
   value.copy_endpoint();
   value.listener_started;
-  value.listener_failed;
+  value.listener_terminated;
 };
 
 template <typename T>
@@ -1071,7 +1071,7 @@ int main() {
     listener.listener_started.connect([&] {
       ++bound;
     });
-    listener.listener_failed.connect([&](const auto&) {
+    listener.listener_terminated.connect([&](const auto&) {
       ++failed;
     });
 
