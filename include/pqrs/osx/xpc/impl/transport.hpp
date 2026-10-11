@@ -456,7 +456,10 @@ private:
 
           run_guarded([&] {
             if (xpc_get_type(event) == XPC_TYPE_CONNECTION) {
-              add_peer(connection::from_peer(static_cast<xpc_connection_t>(event)));
+              // Reject this connection if its signing requirement cannot be applied.
+              if (!add_peer(connection::from_peer(static_cast<xpc_connection_t>(event)))) {
+                return;
+              }
             } else {
               terminate_listener(make_error_code(connection_error(event)));
             }
@@ -482,20 +485,22 @@ private:
       return;
     }
 
-    if (!add_peer(std::move(connection))) {
+    auto added_peer = add_peer(std::move(connection));
+    if (!added_peer) {
       stopped_ = true;
 
-      enqueue_notification([this] {
-        connection_failed(make_error_code(errc::invalid_signing_requirement));
+      auto error = make_error_code(added_peer.error());
+      enqueue_notification([this, error] {
+        connection_failed(error);
       });
     }
   }
 
-  bool add_peer(connection connection) {
+  [[nodiscard]] std::expected<peer_id, errc> add_peer(connection connection) {
     connection.set_target_queue(queue_);
 
     if (!apply_peer_signing_requirement(connection)) {
-      return false;
+      return std::unexpected(errc::invalid_signing_requirement);
     }
 
     auto added_peer = peers_.add(std::move(connection));
@@ -521,7 +526,7 @@ private:
       begin_handshake(id);
     }
 
-    return true;
+    return id;
   }
 
   void begin_handshake(peer_id id) {
@@ -564,8 +569,8 @@ private:
 
     auto data = read_message(event);
     if (!data) {
-      handle_failure(id,
-                     data.error());
+      handle_connection_event_failure(id,
+                                      data.error());
       return;
     }
 
@@ -583,7 +588,7 @@ private:
   }
 
   void handle_hello(peer_id id,
-                    peer& peer,
+                    peer& target_peer,
                     std::optional<dictionary> reply) {
     if (!is_listener() ||
         !reply) {
@@ -593,24 +598,24 @@ private:
     }
 
     mark_ready_for_communication(id,
-                                 peer);
+                                 target_peer);
     reply->set_uint64(type_key,
                       static_cast<uint64_t>(message_type::hello_reply));
 
-    if (!peer.get_connection().send_message(*reply)) {
+    if (!target_peer.get_connection().send_message(*reply)) {
       invalidate(id,
                  errc::connection_invalid);
     }
   }
 
   void handle_application_message(peer_id id,
-                                  peer& peer,
+                                  peer& target_peer,
                                   std::optional<dictionary> reply,
                                   std::shared_ptr<const std::vector<uint8_t>> data) {
     // Reply handlers and event handlers have no cross-handler ordering guarantee.
     // Any authenticated message from the server establishes its identity, even
     // if a notification is dispatched before the handshake reply handler.
-    if (!peer.ready_for_communication()) {
+    if (!target_peer.ready_for_communication()) {
       if (is_listener()) {
         invalidate(id,
                    errc::not_ready);
@@ -618,14 +623,14 @@ private:
       }
 
       mark_ready_for_communication(id,
-                                   peer);
+                                   target_peer);
     }
 
     if (reply) {
       auto token = reply_token(reply_token::state{
           .reply_dictionary = std::move(*reply),
           .peer = id,
-          .session = peer.get_session(),
+          .session = target_peer.get_session(),
       });
 
       enqueue_notification([this, id, token, data] {
@@ -781,8 +786,8 @@ private:
     }
   }
 
-  void handle_failure(peer_id id,
-                      errc error) {
+  void handle_connection_event_failure(peer_id id,
+                                       errc error) {
     fail_peer(id,
               error,
               error == errc::connection_interrupted
