@@ -661,58 +661,9 @@ private:
       }
 
       run_guarded([&] {
-        auto found_peer = peers_.find(id);
-        if (!found_peer) {
-          return;
-        }
-
-        auto request_state = found_peer->take_pending_request(request);
-        if (!request_state) {
-          return;
-        }
-
-        auto data = read_message(event,
-                                 request_state->handshake
-                                     ? message_type::hello_reply
-                                     : message_type::data);
-        if (!data) {
-          // A reply error describes this request, not necessarily the connection.
-          // Only the connection event handler emits peer_interrupted.
-          complete(request_state->completion,
-                   std::unexpected(make_error_code(data.error())));
-
-          if (request_state->handshake &&
-              data.error() == errc::connection_interrupted) {
-            // XPC can reuse this connection. Retry the probe without replacing it.
-            fail_peer(id,
-                      data.error(),
-                      peer_failure_action::interrupt);
-
-          } else {
-            if constexpr (!is_listener()) {
-              if (data.error() == errc::signature_rejected) {
-                // A client-side signing requirement cannot become satisfied by retrying.
-                stopped_ = true;
-              }
-            }
-
-            if (request_state->handshake ||
-                xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
-              invalidate(id,
-                         data.error());
-            }
-          }
-
-          return;
-        }
-
-        if (request_state->handshake) {
-          mark_ready_for_communication(id,
-                                       *found_peer);
-        } else {
-          complete(request_state->completion,
-                   pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>>(data->data));
-        }
+        handle_reply(id,
+                     request,
+                     event);
       });
     };
 
@@ -721,6 +672,72 @@ private:
       // Invalidation consumes pending requests and reports their failure immediately.
       invalidate(id,
                  errc::connection_invalid);
+    }
+  }
+
+  void handle_reply(peer_id id,
+                    uint64_t request_id,
+                    xpc_object_t event) {
+    auto found_peer = peers_.find(id);
+    if (!found_peer) {
+      return;
+    }
+
+    auto request_state = found_peer->take_pending_request(request_id);
+    if (!request_state) {
+      return;
+    }
+
+    auto data = read_message(event,
+                             request_state->handshake
+                                 ? message_type::hello_reply
+                                 : message_type::data);
+    if (!data) {
+      handle_reply_failure(id,
+                           *request_state,
+                           data.error(),
+                           event);
+      return;
+    }
+
+    if (request_state->handshake) {
+      mark_ready_for_communication(id,
+                                   *found_peer);
+    } else {
+      complete(request_state->completion,
+               pqrs::not_null_shared_ptr_t<const std::vector<uint8_t>>(data->data));
+    }
+  }
+
+  void handle_reply_failure(peer_id id,
+                            const peer::pending_request& request_state,
+                            errc error,
+                            xpc_object_t event) {
+    // A reply error describes this request, not necessarily the connection.
+    // Only the connection event handler emits peer_interrupted.
+    complete(request_state.completion,
+             std::unexpected(make_error_code(error)));
+
+    if (request_state.handshake &&
+        error == errc::connection_interrupted) {
+      // XPC can reuse this connection. Retry the probe without replacing it.
+      fail_peer(id,
+                error,
+                peer_failure_action::interrupt);
+      return;
+    }
+
+    if constexpr (!is_listener()) {
+      if (error == errc::signature_rejected) {
+        // A client-side signing requirement cannot become satisfied by retrying.
+        stopped_ = true;
+      }
+    }
+
+    if (request_state.handshake ||
+        xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
+      invalidate(id,
+                 error);
     }
   }
 
