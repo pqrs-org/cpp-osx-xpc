@@ -613,8 +613,8 @@ private:
                                   std::optional<dictionary> reply,
                                   std::shared_ptr<const std::vector<uint8_t>> data) {
     // Reply handlers and event handlers have no cross-handler ordering guarantee.
-    // Any authenticated message from the server establishes its identity, even
-    // if a notification is dispatched before the handshake reply handler.
+    // Any application message from the server demonstrates that the connection
+    // is ready, even if it arrives before the handshake reply handler runs.
     if (!target_peer.ready_for_communication()) {
       if (is_listener()) {
         invalidate(id,
@@ -742,7 +742,9 @@ private:
                             errc error,
                             xpc_object_t event) {
     // A reply error describes this request, not necessarily the connection.
-    // Only the connection event handler emits peer_interrupted.
+    // A handshake interruption transitions the peer immediately so the client
+    // can retry it; other connection interruptions are handled by the connection
+    // event handler.
     complete(request_state.completion,
              std::unexpected(make_error_code(error)));
 
