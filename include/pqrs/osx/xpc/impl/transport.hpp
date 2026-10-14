@@ -33,6 +33,18 @@
 namespace pqrs::osx::xpc::impl {
 
 template <typename Options>
+struct transport_role_storage;
+
+template <>
+struct transport_role_storage<listener_options> final {
+  connection listener;
+};
+
+template <>
+struct transport_role_storage<client_options> final {
+};
+
+template <typename Options>
 class transport : public pqrs::dispatcher::extra::dispatcher_client {
   pqrs::dispatcher::extra::dispatcher_client_constructor_exception_guard constructor_guard_{*this};
 
@@ -87,7 +99,9 @@ public:
         queue_,
         ^{
           *alive_ = false;
-          listener_.cancel();
+          if constexpr (is_listener()) {
+            role_storage_.listener.cancel();
+          }
           peers_.clear();
         });
 
@@ -113,13 +127,15 @@ public:
   }
 
   // For anonymous listeners, after listener_started.
-  [[nodiscard]] object copy_endpoint() const {
+  [[nodiscard]] object copy_endpoint() const
+    requires(std::is_same_v<Options, listener_options>)
+  {
     __block object result;
 
     dispatch_sync(
         queue_,
         ^{
-          result = listener_.copy_endpoint();
+          result = role_storage_.listener.copy_endpoint();
         });
 
     return result;
@@ -293,7 +309,9 @@ private:
       stopped_ = true;
       failed_->store(true);
       // Stop potentially partially updated state without replaying messages.
-      listener_.cancel();
+      if constexpr (is_listener()) {
+        role_storage_.listener.cancel();
+      }
       peers_.clear();
 
       enqueue_to_dispatcher([this] {
@@ -322,7 +340,9 @@ private:
     }
   }
 
-  [[nodiscard]] listener_recovery_action recommended_listener_recovery_action(errc error) const noexcept {
+  [[nodiscard]] listener_recovery_action recommended_listener_recovery_action(errc error) const noexcept
+    requires(std::is_same_v<Options, listener_options>)
+  {
     if (error == errc::invalid_signing_requirement) {
       return listener_recovery_action::correct_configuration;
     }
@@ -335,7 +355,9 @@ private:
     return listener_recovery_action::recreate_listener;
   }
 
-  [[nodiscard]] client_recovery_action recommended_client_recovery_action(errc error) const noexcept {
+  [[nodiscard]] client_recovery_action recommended_client_recovery_action(errc error) const noexcept
+    requires(std::is_same_v<Options, client_options>)
+  {
     switch (error) {
       case errc::signature_rejected:
         return client_recovery_action::recreate_client_after_peer_update;
@@ -348,9 +370,11 @@ private:
     }
   }
 
-  void terminate_listener(errc error) {
+  void terminate_listener(errc error)
+    requires(std::is_same_v<Options, listener_options>)
+  {
     stopped_ = true;
-    listener_.cancel();
+    role_storage_.listener.cancel();
     peers_.clear();
 
     listener_recovery_request request{
@@ -363,9 +387,10 @@ private:
     });
   }
 
-  void terminate_client(errc error) {
+  void terminate_client(errc error)
+    requires(std::is_same_v<Options, client_options>)
+  {
     stopped_ = true;
-    listener_.cancel();
     peers_.clear();
 
     client_recovery_request request{
@@ -494,21 +519,25 @@ private:
     }
   }
 
-  void start_listener() {
-    listener_ = connection::create_listener(options_,
-                                            queue_);
-    if (!listener_.get()) {
+  void start_listener()
+    requires(std::is_same_v<Options, listener_options>)
+  {
+    auto& listener = role_storage_.listener;
+
+    listener = connection::create_listener(options_,
+                                           queue_);
+    if (!listener.get()) {
       terminate_listener(errc::connection_invalid);
       return;
     }
 
-    if (!apply_peer_signing_requirement(listener_)) {
+    if (!apply_peer_signing_requirement(listener)) {
       terminate_listener(errc::invalid_signing_requirement);
       return;
     }
 
     auto alive = alive_;
-    listener_.set_event_handler(
+    listener.set_event_handler(
         ^(xpc_object_t event) {
           if (!*alive) {
             return;
@@ -526,14 +555,16 @@ private:
           });
         });
 
-    listener_.resume();
+    listener.resume();
 
     enqueue_notification([this] {
       listener_started();
     });
   }
 
-  void start_client() {
+  void start_client()
+    requires(std::is_same_v<Options, client_options>)
+  {
     auto connection = connection::create_client(options_,
                                                 queue_);
     if (!connection.get()) {
@@ -963,7 +994,7 @@ private:
   pqrs::not_null_shared_ptr_t<std::atomic<bool>> failed_{std::make_shared<std::atomic<bool>>(false)};
   bool stopped_{false}; // only accessed on queue_; set after a terminal failure
   bool started_{false};
-  connection listener_;
+  [[no_unique_address]] transport_role_storage<Options> role_storage_;
   peers peers_;
   uint64_t next_request_id_{0};
   std::chrono::steady_clock::time_point reconnect_at_{};
