@@ -55,6 +55,11 @@ struct listener_options final : public common_options {
   struct parameters final {
     // launchd Mach service name to listen on; empty creates an anonymous listener.
     std::string service_name;
+
+    // Maximum number of accepted peer connections retained by this listener.
+    // Must be positive. Connections beyond this limit are cancelled before
+    // they enter the application protocol handshake.
+    size_t max_peer_count{128};
   };
 
   struct configuration final {
@@ -72,7 +77,8 @@ struct listener_options final : public common_options {
         listener_parameters(configuration.listener_parameters) {}
 
   [[nodiscard]] bool validate() const noexcept {
-    return common_parameters.validate();
+    return common_parameters.validate() &&
+           listener_parameters.max_peer_count > 0;
   }
 
   parameters listener_parameters;

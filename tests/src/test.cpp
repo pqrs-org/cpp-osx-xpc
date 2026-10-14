@@ -86,6 +86,14 @@ int main() {
     expect(listener_options{}.validate());
     expect(client_options{}.validate());
 
+    expect(!listener_options({
+                                 .common_parameters = {},
+                                 .listener_parameters = {
+                                     .max_peer_count = 0,
+                                 },
+                             })
+                .validate());
+
     expect(listener_options({
                                 .max_message_size = std::nullopt,
                             })
@@ -462,6 +470,84 @@ int main() {
     }));
 
     expect(roundtrip.load());
+  };
+
+  "listener peer limit rejects excess connections without disrupting admitted peers"_test = [&] {
+    std::atomic<int> listener_peers{0}, rejected_connection_retries{0};
+    std::atomic<peer_id> admitted_client_peer{0};
+    std::atomic<bool> replied{false};
+
+    pqrs::osx::xpc::listener listener(
+        dispatcher,
+        listener_options({
+            .common_parameters = {},
+            .listener_parameters = {
+                .max_peer_count = 1,
+            },
+        }));
+    listener.peer_ready.connect([&](auto) {
+      ++listener_peers;
+    });
+    listener.request_received.connect([&](auto,
+                                          auto token,
+                                          auto data) {
+      listener.async_reply(token,
+                           data);
+    });
+
+    auto endpoint = start_listener(listener);
+    pqrs::osx::xpc::client admitted_client(
+        dispatcher,
+        client_options({
+            .common_parameters = {},
+            .client_parameters = {
+                .endpoint = endpoint,
+            },
+        }));
+    admitted_client.peer_ready.connect([&](auto id) {
+      admitted_client_peer = id;
+    });
+    admitted_client.async_start();
+
+    expect(wait_for("the first client to be admitted", [&] {
+      return listener_peers == 1 &&
+             admitted_client_peer != 0;
+    })) << fatal;
+
+    pqrs::osx::xpc::client rejected_client(
+        dispatcher,
+        client_options({
+            .common_parameters = {
+                .tick_interval = 20ms,
+            },
+            .client_parameters = {
+                .reconnect_interval = 20ms,
+                .endpoint = endpoint,
+            },
+        }));
+    rejected_client.connection_retry_scheduled.connect([&](const auto&) {
+      ++rejected_connection_retries;
+    });
+    rejected_client.async_start();
+
+    expect(wait_for("the excess connection to be rejected", [&] {
+      return rejected_connection_retries != 0;
+    })) << fatal;
+
+    admitted_client.async_request({
+        .id = admitted_client_peer,
+        .data = std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1}),
+        .completion = [&](auto result) {
+          replied = result &&
+                    **result == std::vector<uint8_t>{1};
+        },
+    });
+
+    expect(wait_for("the admitted client to remain usable", [&] {
+      return replied.load();
+    })) << fatal;
+
+    expect(listener_peers == 1);
   };
 
   "payload limits accept the boundary and reject larger outgoing requests"_test = [&] {
@@ -1116,6 +1202,9 @@ int main() {
     expect(wait_for("named listener invalidation", [&] {
       return terminated != 0;
     })) << fatal;
+
+    std::this_thread::sleep_for(100ms);
+    expect(terminated == 1);
   };
 
   "invalid client signature requirement fails without retrying"_test = [&] {

@@ -373,6 +373,10 @@ private:
   void terminate_listener(errc error)
     requires(std::is_same_v<Options, listener_options>)
   {
+    if (stopped_) {
+      return;
+    }
+
     stopped_ = true;
     role_storage_.listener.cancel();
     peers_.clear();
@@ -387,10 +391,23 @@ private:
     });
   }
 
-  void terminate_client(errc error)
+  void terminate_client(errc error,
+                        std::optional<peer_id> invalidated_peer = std::nullopt)
     requires(std::is_same_v<Options, client_options>)
   {
+    if (stopped_) {
+      return;
+    }
+
     stopped_ = true;
+
+    // Invalidation is performed after stopped_ is set so a terminal peer
+    // failure cannot schedule an automatic connection retry.
+    if (invalidated_peer) {
+      invalidate(*invalidated_peer,
+                 error);
+    }
+
     peers_.clear();
 
     client_recovery_request request{
@@ -545,8 +562,16 @@ private:
 
           run_guarded([&] {
             if (xpc_get_type(event) == XPC_TYPE_CONNECTION) {
+              // Take ownership before checking the limit so a rejected suspended
+              // connection is resumed, cancelled, and released by RAII.
+              auto peer_connection = connection::from_peer(static_cast<xpc_connection_t>(event));
+
+              if (peers_.size() >= options_.listener_parameters.max_peer_count) {
+                return;
+              }
+
               // Reject this connection if its signing requirement cannot be applied.
-              if (!add_peer(connection::from_peer(static_cast<xpc_connection_t>(event)))) {
+              if (!add_peer(std::move(peer_connection))) {
                 return;
               }
             } else {
@@ -846,11 +871,8 @@ private:
     if constexpr (!is_listener()) {
       if (error == errc::signature_rejected) {
         // A client-side signing requirement cannot become satisfied by retrying.
-        stopped_ = true;
-
-        invalidate(id,
-                   error);
-        terminate_client(error);
+        terminate_client(error,
+                         id);
         return;
       }
     }
