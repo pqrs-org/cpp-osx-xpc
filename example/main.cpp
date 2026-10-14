@@ -48,14 +48,9 @@ int main() {
       finish_listener(true);
     });
 
-    listener.listener_terminated.connect([&](const auto& error) {
-      std::cerr << "Listener terminated; recreate it to retry: " << error.message() << '\n';
+    listener.listener_recovery_required.connect([&](const auto& request) {
+      std::cerr << "Listener recovery required: " << request.error.message() << '\n';
       finish_listener(false);
-    });
-    listener.error_occurred.connect([&](const auto&) {
-      std::cerr << "Server transport failed\n";
-      finish_listener(false);
-      finish(1);
     });
     listener.request_received.connect([&](auto, auto reply, auto data) {
       listener.async_reply(reply,
@@ -77,12 +72,12 @@ int main() {
                                           .endpoint = listener.copy_endpoint(),
                                       },
                                   }));
-    client.error_occurred.connect([&](const auto&) {
-      std::cerr << "Client transport failed\n";
+    client.client_recovery_required.connect([&](const auto& request) {
+      std::cerr << "Client recovery required: " << request.error.message() << '\n';
       finish(1);
     });
-    client.connection_failed.connect([&](const auto& error) {
-      std::cerr << "Connection failed: " << error.message() << '\n';
+    client.connection_retry_scheduled.connect([&](const auto& error) {
+      std::cerr << "Connection retry scheduled: " << error.message() << '\n';
       finish(1);
     });
     client.peer_ready.connect([&](auto id) {

@@ -7,4 +7,6 @@
 // (See https://www.boost.org/LICENSE_1_0.txt)
 
 #include "xpc/client.hpp"
+#include "xpc/client_recovery.hpp"
 #include "xpc/listener.hpp"
+#include "xpc/listener_recovery.hpp"

@@ -4,9 +4,11 @@
 // Distributed under the Boost Software License, Version 1.0.
 // (See https://www.boost.org/LICENSE_1_0.txt)
 
+#include "../client_recovery.hpp"
 #include "../connection.hpp"
 #include "../dictionary.hpp"
 #include "../error.hpp"
+#include "../listener_recovery.hpp"
 #include "../options.hpp"
 #include "../peer.hpp"
 #include "../peers.hpp"
@@ -38,17 +40,19 @@ public:
   // All signals and completions run on the supplied dispatcher.
   // started means activated locally, not that launchd has confirmed registration.
   // Terminal failure: this transport stops processing work. Pending operations
-  // are abandoned; the owner must reconcile application state when recreating it.
+  // are abandoned; the owner must follow the emitted recovery request.
   // Handlers must not throw and must enqueue destruction/reinitialization, rather
   // than destroying this transport during signal emission.
-  nod::signal<void(const error_info&)> error_occurred;
+  nod::signal<void(const client_recovery_request&)> client_recovery_required;
   nod::signal<void()> listener_started;
-  // Terminal listener failure. This transport cannot be started again; its
-  // owner must defer destruction and create a replacement listener.
-  nod::signal<void(const std::error_code&)> listener_terminated;
-  // The client could not establish or re-establish a ready peer session.
+  // Terminal listener failure. This transport cannot be started again.
+  // recommended_action tells the owner how to restore the service after
+  // deferring this transport's destruction until signal delivery has returned.
+  nod::signal<void(const listener_recovery_request&)> listener_recovery_required;
+  // The client could not establish or re-establish a ready peer session and
+  // will retry automatically. Terminal failures require owner recovery instead.
   // peer_invalidated is also emitted when a created peer is invalidated.
-  nod::signal<void(const std::error_code&)> connection_failed;
+  nod::signal<void(const std::error_code&)> connection_retry_scheduled;
   nod::signal<void(peer_id)> peer_ready;
   nod::signal<void(peer_id)> peer_interrupted;
   nod::signal<void(peer_id, const std::error_code&)> peer_invalidated;
@@ -294,9 +298,19 @@ private:
 
       enqueue_to_dispatcher([this] {
         try {
-          error_info error{make_error_code(errc::unexpected_exception),
-                           "Unexpected XPC transport exception"};
-          error_occurred(error);
+          if constexpr (is_listener()) {
+            listener_recovery_request request{
+                .error = make_error_code(errc::unexpected_exception),
+                .recommended_action = listener_recovery_action::recreate_listener,
+            };
+            listener_recovery_required(request);
+          } else {
+            client_recovery_request request{
+                .error = make_error_code(errc::unexpected_exception),
+                .recommended_action = client_recovery_action::recreate_client,
+            };
+            client_recovery_required(request);
+          }
         } catch (...) {
           std::fputs("XPC transport error creation or notification threw an exception\n",
                      stderr);
@@ -308,13 +322,59 @@ private:
     }
   }
 
-  void terminate_listener(const std::error_code& error) {
+  [[nodiscard]] listener_recovery_action recommended_listener_recovery_action(errc error) const noexcept {
+    if (error == errc::invalid_signing_requirement) {
+      return listener_recovery_action::correct_configuration;
+    }
+
+    if (error == errc::connection_invalid &&
+        !options_.listener_parameters.service_name.empty()) {
+      return listener_recovery_action::restart_process;
+    }
+
+    return listener_recovery_action::recreate_listener;
+  }
+
+  [[nodiscard]] client_recovery_action recommended_client_recovery_action(errc error) const noexcept {
+    switch (error) {
+      case errc::signature_rejected:
+        return client_recovery_action::recreate_client_after_peer_update;
+
+      case errc::invalid_signing_requirement:
+        return client_recovery_action::correct_configuration;
+
+      default:
+        return client_recovery_action::recreate_client;
+    }
+  }
+
+  void terminate_listener(errc error) {
     stopped_ = true;
     listener_.cancel();
     peers_.clear();
 
-    enqueue_notification([this, error] {
-      listener_terminated(error);
+    listener_recovery_request request{
+        .error = make_error_code(error),
+        .recommended_action = recommended_listener_recovery_action(error),
+    };
+
+    enqueue_notification([this, request] {
+      listener_recovery_required(request);
+    });
+  }
+
+  void terminate_client(errc error) {
+    stopped_ = true;
+    listener_.cancel();
+    peers_.clear();
+
+    client_recovery_request request{
+        .error = make_error_code(error),
+        .recommended_action = recommended_client_recovery_action(error),
+    };
+
+    enqueue_notification([this, request] {
+      client_recovery_required(request);
     });
   }
 
@@ -438,12 +498,12 @@ private:
     listener_ = connection::create_listener(options_,
                                             queue_);
     if (!listener_.get()) {
-      terminate_listener(make_error_code(errc::connection_invalid));
+      terminate_listener(errc::connection_invalid);
       return;
     }
 
     if (!apply_peer_signing_requirement(listener_)) {
-      terminate_listener(make_error_code(errc::invalid_signing_requirement));
+      terminate_listener(errc::invalid_signing_requirement);
       return;
     }
 
@@ -461,7 +521,7 @@ private:
                 return;
               }
             } else {
-              terminate_listener(make_error_code(connection_error(event)));
+              terminate_listener(connection_error(event));
             }
           });
         });
@@ -478,7 +538,7 @@ private:
                                                 queue_);
     if (!connection.get()) {
       enqueue_notification([this] {
-        connection_failed(make_error_code(errc::connection_invalid));
+        connection_retry_scheduled(make_error_code(errc::connection_invalid));
       });
 
       reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
@@ -487,12 +547,7 @@ private:
 
     auto added_peer = add_peer(std::move(connection));
     if (!added_peer) {
-      stopped_ = true;
-
-      auto error = make_error_code(added_peer.error());
-      enqueue_notification([this, error] {
-        connection_failed(error);
-      });
+      terminate_client(added_peer.error());
     }
   }
 
@@ -761,6 +816,11 @@ private:
       if (error == errc::signature_rejected) {
         // A client-side signing requirement cannot become satisfied by retrying.
         stopped_ = true;
+
+        invalidate(id,
+                   error);
+        terminate_client(error);
+        return;
       }
     }
 
@@ -824,9 +884,10 @@ private:
 
       auto error = make_error_code(reason);
       if constexpr (!is_listener()) {
-        if (!was_ready_for_communication) {
+        if (!stopped_ &&
+            !was_ready_for_communication) {
           enqueue_notification([this, error] {
-            connection_failed(error);
+            connection_retry_scheduled(error);
           });
         }
       }
@@ -842,7 +903,8 @@ private:
                            error);
         });
 
-        if (!is_listener()) {
+        if (!is_listener() &&
+            !stopped_) {
           reconnect_at_ = std::chrono::steady_clock::now() + reconnect_interval();
         }
       }

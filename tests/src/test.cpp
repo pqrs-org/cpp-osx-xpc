@@ -18,12 +18,13 @@ template <typename T>
 concept has_listener_api = requires(T& value) {
   value.copy_endpoint();
   value.listener_started;
-  value.listener_terminated;
+  value.listener_recovery_required;
 };
 
 template <typename T>
 concept has_client_api = requires(T& value) {
-  value.connection_failed;
+  value.client_recovery_required;
+  value.connection_retry_scheduled;
 };
 
 // Keep role-specific APIs and options unavailable on the other transport role.
@@ -963,7 +964,7 @@ int main() {
 
   "client verifies the signature of native handshake replies"_test = [&] {
     // Require a signature that the listener cannot satisfy when returning the handshake reply.
-    std::atomic<int> admitted{0}, connection_failures{0}, rejected{0};
+    std::atomic<int> admitted{0}, terminations{0}, rejected{0};
 
     pqrs::osx::xpc::listener listener(dispatcher,
                                       listener_options({
@@ -986,10 +987,10 @@ int main() {
     client.peer_ready.connect([&](auto) {
       ++admitted;
     });
-    client.connection_failed.connect([&](const auto& error) {
-      if (error == make_error_code(errc::signature_rejected)) {
-        ++connection_failures;
-      }
+    client.client_recovery_required.connect([&](const auto& request) {
+      expect(request.error == make_error_code(errc::signature_rejected));
+      expect(request.recommended_action == client_recovery_action::recreate_client_after_peer_update);
+      ++terminations;
     });
     client.peer_invalidated.connect([&](auto,
                                         const auto& error) {
@@ -1002,7 +1003,7 @@ int main() {
     client.async_start();
 
     expect(wait_for("handshake signature rejection", [&] {
-      return connection_failures != 0 &&
+      return terminations != 0 &&
              rejected != 0;
     }));
 
@@ -1010,7 +1011,7 @@ int main() {
 
     // The short retry interval above would produce more rejections unless signature rejection stops the client.
     std::this_thread::sleep_for(100ms);
-    expect(connection_failures == 1);
+    expect(terminations == 1);
     expect(rejected == 1);
   };
 
@@ -1045,7 +1046,7 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.connection_failed.connect([&](const auto&) {
+    client.connection_retry_scheduled.connect([&](const auto&) {
       ++connection_failures;
     });
 
@@ -1075,7 +1076,9 @@ int main() {
     listener.listener_started.connect([&] {
       ++bound;
     });
-    listener.listener_terminated.connect([&](const auto&) {
+    listener.listener_recovery_required.connect([&](const auto& request) {
+      expect(request.error == make_error_code(errc::invalid_signing_requirement));
+      expect(request.recommended_action == listener_recovery_action::correct_configuration);
       ++failed;
     });
 
@@ -1087,6 +1090,32 @@ int main() {
     }));
 
     expect(bound == 0);
+  };
+
+  "invalid named listener recommends restarting the process"_test = [&] {
+    std::atomic<int> terminated{0};
+
+    // This test process is not a launchd job that advertises this Mach service,
+    // so activating the named listener must invalidate it.
+    pqrs::osx::xpc::listener listener(
+        dispatcher,
+        listener_options({
+            .common_parameters = {},
+            .listener_parameters = {
+                .service_name = "org.pqrs.cpp-osx-xpc.unregistered-test",
+            },
+        }));
+    listener.listener_recovery_required.connect([&](const auto& request) {
+      expect(request.error == make_error_code(errc::connection_invalid));
+      expect(request.recommended_action == listener_recovery_action::restart_process);
+      ++terminated;
+    });
+
+    listener.async_start();
+
+    expect(wait_for("named listener invalidation", [&] {
+      return terminated != 0;
+    })) << fatal;
   };
 
   "invalid client signature requirement fails without retrying"_test = [&] {
@@ -1106,8 +1135,9 @@ int main() {
                 .endpoint = start_listener(listener),
             },
         }));
-    client.connection_failed.connect([&](const auto& error) {
-      expect(error == make_error_code(errc::invalid_signing_requirement));
+    client.client_recovery_required.connect([&](const auto& request) {
+      expect(request.error == make_error_code(errc::invalid_signing_requirement));
+      expect(request.recommended_action == client_recovery_action::correct_configuration);
       ++failures;
     });
 
@@ -1158,11 +1188,11 @@ int main() {
     listener->listener_started.connect([] {
       throw std::runtime_error("listener callback failed");
     });
-    listener->error_occurred.connect([&](const error_info& error) {
+    listener->listener_recovery_required.connect([&](const listener_recovery_request& request) {
       ++failures;
       on_dispatcher = listener->dispatcher_thread();
-      correct_error = error.code == make_error_code(errc::unexpected_exception) &&
-                      error.message == "Unexpected XPC transport exception";
+      correct_error = request.error == make_error_code(errc::unexpected_exception) &&
+                      request.recommended_action == listener_recovery_action::recreate_listener;
       parent.enqueue_to_dispatcher([&] {
         listener = std::make_unique<pqrs::osx::xpc::listener>(dispatcher,
                                                               listener_options({
@@ -1216,9 +1246,9 @@ int main() {
     client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
-    client.error_occurred.connect([&](const error_info& error) {
-      correct_error = error.code == make_error_code(errc::unexpected_exception) &&
-                      error.message == "Unexpected XPC transport exception";
+    client.client_recovery_required.connect([&](const client_recovery_request& request) {
+      correct_error = request.error == make_error_code(errc::unexpected_exception) &&
+                      request.recommended_action == client_recovery_action::recreate_client;
       ++failures;
     });
 
@@ -1256,8 +1286,9 @@ int main() {
                                       .common_parameters = {},
                                       .client_parameters = {},
                                   }));
-    client.error_occurred.connect([&](const error_info& error) {
-      expect(error.code == make_error_code(errc::unexpected_exception));
+    client.client_recovery_required.connect([&](const client_recovery_request& request) {
+      expect(request.error == make_error_code(errc::unexpected_exception));
+      expect(request.recommended_action == client_recovery_action::recreate_client);
       ++failures;
     });
 
@@ -1325,9 +1356,10 @@ int main() {
     client.peer_ready.connect([&](auto id) {
       client_peer = id;
     });
-    client.error_occurred.connect([&](const error_info& error) {
+    client.client_recovery_required.connect([&](const client_recovery_request& request) {
       on_dispatcher = client.dispatcher_thread();
-      generic_error = error.code == make_error_code(errc::unexpected_exception);
+      generic_error = request.error == make_error_code(errc::unexpected_exception) &&
+                      request.recommended_action == client_recovery_action::recreate_client;
       ++failures;
     });
 
