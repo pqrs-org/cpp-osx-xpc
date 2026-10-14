@@ -474,7 +474,7 @@ int main() {
 
   "listener peer limit rejects excess connections without disrupting admitted peers"_test = [&] {
     std::atomic<int> listener_peers{0}, rejected_connection_retries{0};
-    std::atomic<peer_id> admitted_client_peer{0};
+    std::atomic<peer_id> admitted_client_peer{0}, recovered_client_peer{0};
     std::atomic<bool> replied{false};
 
     pqrs::osx::xpc::listener listener(
@@ -496,7 +496,7 @@ int main() {
     });
 
     auto endpoint = start_listener(listener);
-    pqrs::osx::xpc::client admitted_client(
+    auto admitted_client = std::make_unique<pqrs::osx::xpc::client>(
         dispatcher,
         client_options({
             .common_parameters = {},
@@ -504,10 +504,10 @@ int main() {
                 .endpoint = endpoint,
             },
         }));
-    admitted_client.peer_ready.connect([&](auto id) {
+    admitted_client->peer_ready.connect([&](auto id) {
       admitted_client_peer = id;
     });
-    admitted_client.async_start();
+    admitted_client->async_start();
 
     expect(wait_for("the first client to be admitted", [&] {
       return listener_peers == 1 &&
@@ -528,13 +528,16 @@ int main() {
     rejected_client.connection_retry_scheduled.connect([&](const auto&) {
       ++rejected_connection_retries;
     });
+    rejected_client.peer_ready.connect([&](auto id) {
+      recovered_client_peer = id;
+    });
     rejected_client.async_start();
 
     expect(wait_for("the excess connection to be rejected", [&] {
       return rejected_connection_retries != 0;
     })) << fatal;
 
-    admitted_client.async_request({
+    admitted_client->async_request({
         .id = admitted_client_peer,
         .data = std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{1}),
         .completion = [&](auto result) {
@@ -548,6 +551,13 @@ int main() {
     })) << fatal;
 
     expect(listener_peers == 1);
+
+    admitted_client.reset();
+
+    expect(wait_for("the rejected client to connect after a slot is released", [&] {
+      return listener_peers == 2 &&
+             recovered_client_peer != 0;
+    })) << fatal;
   };
 
   "payload limits accept the boundary and reject larger outgoing requests"_test = [&] {
