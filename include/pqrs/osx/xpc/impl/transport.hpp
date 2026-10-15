@@ -566,7 +566,8 @@ private:
               // connection is resumed, cancelled, and released by RAII.
               auto peer_connection = connection::from_peer(static_cast<xpc_connection_t>(event));
 
-              if (peers_.size() >= options_.listener_parameters.max_peer_count) {
+              if (stopped_ ||
+                  peers_.size() >= options_.listener_parameters.max_peer_count) {
                 return;
               }
 
