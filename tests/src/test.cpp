@@ -8,6 +8,7 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <unistd.h>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -407,6 +408,16 @@ int main() {
 
   "request replies and notifications preserve dispatcher execution"_test = [&] {
     std::atomic<peer_id> listener_peer{0}, client_peer{0};
+    std::atomic<uid_t> listener_peer_euid{static_cast<uid_t>(-1)};
+    std::atomic<uid_t> client_peer_euid{static_cast<uid_t>(-1)};
+    std::atomic<gid_t> listener_peer_egid{static_cast<gid_t>(-1)};
+    std::atomic<gid_t> client_peer_egid{static_cast<gid_t>(-1)};
+    std::atomic<au_asid_t> listener_peer_audit_session_id{static_cast<au_asid_t>(-1)};
+    std::atomic<au_asid_t> client_peer_audit_session_id{static_cast<au_asid_t>(-1)};
+    std::atomic<pid_t> listener_peer_pid{static_cast<pid_t>(-1)};
+    std::atomic<pid_t> client_peer_pid{static_cast<pid_t>(-1)};
+    std::atomic<uid_t> request_peer_euid{static_cast<uid_t>(-1)};
+    std::atomic<uid_t> message_peer_euid{static_cast<uid_t>(-1)};
     std::atomic<bool> on_dispatcher{false}, notified{false};
 
     pqrs::osx::xpc::listener listener(dispatcher,
@@ -414,13 +425,22 @@ int main() {
                                           .common_parameters = {},
                                           .listener_parameters = {},
                                       }));
-    listener.peer_ready.connect([&](auto id) {
+    listener.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       listener_peer = id;
+      expect(context.identity.has_value());
+      listener_peer_euid = context.identity->get_euid();
+      listener_peer_egid = context.identity->get_egid();
+      listener_peer_audit_session_id = context.identity->get_audit_session_id();
+      listener_peer_pid = context.identity->get_pid();
       on_dispatcher = listener.dispatcher_thread();
     });
-    listener.request_received.connect([&](auto id,
-                                          auto request,
+    listener.request_received.connect([&](const auto& context,
                                           auto data) {
+      auto id = context.peer.id;
+      auto request = context.reply;
+      expect(context.peer.identity.has_value());
+      request_peer_euid = context.peer.identity->get_euid();
       listener.async_reply(request,
                            data);
       listener.async_send(id,
@@ -434,11 +454,19 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
+      expect(context.identity.has_value());
+      client_peer_euid = context.identity->get_euid();
+      client_peer_egid = context.identity->get_egid();
+      client_peer_audit_session_id = context.identity->get_audit_session_id();
+      client_peer_pid = context.identity->get_pid();
     });
-    client.message_received.connect([&](auto,
+    client.message_received.connect([&](const auto& context,
                                         auto data) {
+      expect(context.identity.has_value());
+      message_peer_euid = context.identity->get_euid();
       notified = *data == std::vector<uint8_t>{4, 3, 2, 1};
     });
 
@@ -450,6 +478,13 @@ int main() {
     })) << fatal;
 
     expect(on_dispatcher.load());
+    expect(listener_peer_euid == geteuid());
+    expect(client_peer_euid == geteuid());
+    expect(listener_peer_egid == getegid());
+    expect(client_peer_egid == getegid());
+    expect(listener_peer_audit_session_id == client_peer_audit_session_id);
+    expect(listener_peer_pid == getpid());
+    expect(client_peer_pid == getpid());
 
     // Round trip a request and receive a separate notification.
     std::atomic<bool> roundtrip{false}, completed{false};
@@ -470,6 +505,8 @@ int main() {
     }));
 
     expect(roundtrip.load());
+    expect(request_peer_euid == geteuid());
+    expect(message_peer_euid == geteuid());
   };
 
   "listener peer limit rejects excess connections without disrupting admitted peers"_test = [&] {
@@ -485,12 +522,12 @@ int main() {
                 .max_peer_count = 1,
             },
         }));
-    listener.peer_ready.connect([&](auto) {
+    listener.peer_ready.connect([&](const auto&) {
       ++listener_peers;
     });
-    listener.request_received.connect([&](auto,
-                                          auto token,
+    listener.request_received.connect([&](const auto& context,
                                           auto data) {
+      auto token = context.reply;
       listener.async_reply(token,
                            data);
     });
@@ -504,7 +541,8 @@ int main() {
                 .endpoint = endpoint,
             },
         }));
-    admitted_client->peer_ready.connect([&](auto id) {
+    admitted_client->peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       admitted_client_peer = id;
     });
     admitted_client->async_start();
@@ -528,7 +566,8 @@ int main() {
     rejected_client.connection_retry_scheduled.connect([&](const auto&) {
       ++rejected_connection_retries;
     });
-    rejected_client.peer_ready.connect([&](auto id) {
+    rejected_client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       recovered_client_peer = id;
     });
     rejected_client.async_start();
@@ -571,9 +610,9 @@ int main() {
                                         listener_options({
                                             .max_message_size = limit,
                                         }));
-      listener.request_received.connect([&](auto,
-                                            auto token,
+      listener.request_received.connect([&](const auto& context,
                                             auto data) {
+        auto token = context.reply;
         ++requests;
         listener.async_reply(token,
                              data);
@@ -588,7 +627,8 @@ int main() {
                                             .endpoint = start_listener(listener),
                                         },
                                     }));
-      client.peer_ready.connect([&](auto id) {
+      client.peer_ready.connect([&](const auto& context) {
+        auto id = context.id;
         client_peer = id;
       });
 
@@ -639,9 +679,9 @@ int main() {
                                       listener_options({
                                           .max_message_size = std::nullopt,
                                       }));
-    listener.request_received.connect([&](auto,
-                                          auto token,
+    listener.request_received.connect([&](const auto& context,
                                           auto data) {
+      auto token = context.reply;
       listener.async_reply(token,
                            data);
     });
@@ -655,7 +695,8 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
     });
 
@@ -696,9 +737,9 @@ int main() {
                                           .common_parameters = {},
                                           .listener_parameters = {},
                                       }));
-    listener.request_received.connect([&](auto,
-                                          auto reply,
+    listener.request_received.connect([&](const auto& context,
                                           auto) {
+      auto reply = context.reply;
       if (!unanswered) {
         unanswered = reply;
       } else {
@@ -718,7 +759,8 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
       ++connections;
     });
@@ -790,8 +832,7 @@ int main() {
                                           },
                                           .listener_parameters = {},
                                       }));
-    listener.request_received.connect([&](auto,
-                                          auto,
+    listener.request_received.connect([&](const auto& context,
                                           auto) {
       ++requests;
     });
@@ -809,7 +850,8 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
     });
     client.async_start();
@@ -849,9 +891,9 @@ int main() {
                                           .common_parameters = {},
                                           .listener_parameters = {},
                                       }));
-    listener.request_received.connect([&](auto,
-                                          auto reply,
+    listener.request_received.connect([&](const auto& context,
                                           auto) {
+      auto reply = context.reply;
       replies.push_back(reply);
       if (replies.size() == 2) {
         listener.async_reply(replies[1],
@@ -870,7 +912,8 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
     });
 
@@ -918,7 +961,8 @@ int main() {
                                           .common_parameters = {},
                                           .listener_parameters = {},
                                       }));
-    listener.peer_ready.connect([&](auto id) {
+    listener.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       listener_peer = id;
     });
 
@@ -929,14 +973,15 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
     });
 
     // Try replying from the nonowning transport before the owning listener sends the valid reply.
-    listener.request_received.connect([&](auto,
-                                          auto reply,
+    listener.request_received.connect([&](const auto& context,
                                           auto) {
+      auto reply = context.reply;
       client.async_reply(reply,
                          std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{99}));
 
@@ -993,9 +1038,9 @@ int main() {
                                           .common_parameters = {},
                                           .listener_parameters = {},
                                       }));
-    listener.request_received.connect([&](auto,
-                                          auto reply,
+    listener.request_received.connect([&](const auto& context,
                                           auto) {
+      auto reply = context.reply;
       if (++requests > 1) {
         listener.async_reply(reply,
                              std::make_shared<const std::vector<uint8_t>>(std::vector<uint8_t>{7}));
@@ -1009,7 +1054,8 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
     });
     client.peer_interrupted.connect([&](auto) {
@@ -1061,6 +1107,7 @@ int main() {
   "client verifies the signature of native handshake replies"_test = [&] {
     // Require a signature that the listener cannot satisfy when returning the handshake reply.
     std::atomic<int> admitted{0}, terminations{0}, rejected{0};
+    std::atomic<bool> rejected_identity_absent{false};
 
     pqrs::osx::xpc::listener listener(dispatcher,
                                       listener_options({
@@ -1080,7 +1127,7 @@ int main() {
                 .endpoint = start_listener(listener),
             },
         }));
-    client.peer_ready.connect([&](auto) {
+    client.peer_ready.connect([&](const auto&) {
       ++admitted;
     });
     client.client_recovery_required.connect([&](const auto& request) {
@@ -1088,9 +1135,10 @@ int main() {
       expect(request.recommended_action == client_recovery_action::recreate_client_after_peer_update);
       ++terminations;
     });
-    client.peer_invalidated.connect([&](auto,
+    client.peer_invalidated.connect([&](const auto& context,
                                         const auto& error) {
       if (error == make_error_code(errc::signature_rejected)) {
+        rejected_identity_absent = !context.identity.has_value();
         ++rejected;
       }
     });
@@ -1104,6 +1152,7 @@ int main() {
     }));
 
     expect(admitted == 0);
+    expect(rejected_identity_absent.load());
 
     // The short retry interval above would produce more rejections unless signature rejection stops the client.
     std::this_thread::sleep_for(100ms);
@@ -1123,11 +1172,10 @@ int main() {
             },
             .listener_parameters = {},
         }));
-    listener.peer_ready.connect([&](auto) {
+    listener.peer_ready.connect([&](const auto&) {
       ++admitted;
     });
-    listener.request_received.connect([&](auto,
-                                          auto,
+    listener.request_received.connect([&](const auto& context,
                                           auto) {
       ++requests;
     });
@@ -1328,9 +1376,9 @@ int main() {
                                           .common_parameters = {},
                                           .listener_parameters = {},
                                       }));
-    listener.request_received.connect([&](auto,
-                                          auto token,
+    listener.request_received.connect([&](const auto& context,
                                           auto data) {
+      auto token = context.reply;
       listener.async_reply(token,
                            data);
     });
@@ -1342,7 +1390,8 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
     });
     client.client_recovery_required.connect([&](const client_recovery_request& request) {
@@ -1437,8 +1486,7 @@ int main() {
                                           },
                                           .listener_parameters = {},
                                       }));
-    listener.request_received.connect([&](auto,
-                                          auto,
+    listener.request_received.connect([&](const auto& context,
                                           auto) {
       ++requests;
     });
@@ -1452,7 +1500,8 @@ int main() {
                                           .endpoint = start_listener(listener),
                                       },
                                   }));
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       client_peer = id;
     });
     client.client_recovery_required.connect([&](const client_recovery_request& request) {

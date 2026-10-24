@@ -52,7 +52,9 @@ int main() {
       std::cerr << "Listener recovery required: " << request.error.message() << '\n';
       finish_listener(false);
     });
-    listener.request_received.connect([&](auto, auto reply, auto data) {
+    listener.request_received.connect([&](const auto& context,
+                                          auto data) {
+      auto reply = context.reply;
       listener.async_reply(reply,
                            data);
     });
@@ -80,7 +82,8 @@ int main() {
       std::cerr << "Connection retry scheduled: " << error.message() << '\n';
       finish(1);
     });
-    client.peer_ready.connect([&](auto id) {
+    client.peer_ready.connect([&](const auto& context) {
+      auto id = context.id;
       const std::string message = "Hello from cpp-osx-xpc!";
       auto data = std::make_shared<const std::vector<uint8_t>>(message.begin(),
                                                                message.end());

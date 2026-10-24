@@ -10,3 +10,6 @@
 #include "xpc/client_recovery.hpp"
 #include "xpc/listener.hpp"
 #include "xpc/listener_recovery.hpp"
+#include "xpc/peer_context.hpp"
+#include "xpc/peer_identity.hpp"
+#include "xpc/request_context.hpp"
