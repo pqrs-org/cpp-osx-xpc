@@ -369,12 +369,17 @@ int main() {
   };
 
   "peer interruption invalidates the session and pending requests block retries"_test = [] {
-    // Mark the initial session ready and leave one request pending.
-    peer value{connection{}};
+    // Use a native connection so mark_ready_for_communication captures an
+    // identity. This test exercises peer state only; no listener is started.
+    peer value{connection::create_listener(listener_options{},
+                                           nullptr)};
     auto now = std::chrono::steady_clock::now();
     auto session = value.get_session();
+    expect(!value.make_context(1).identity.has_value());
     expect(value.mark_ready_for_communication());
     expect(!value.mark_ready_for_communication());
+    auto ready_context = value.make_context(1);
+    expect(ready_context.identity.has_value());
     value.add_pending_request(1,
                               {
                                   .completion = {},
@@ -382,8 +387,11 @@ int main() {
                                   .handshake = false,
                               });
 
-    // The first interruption replaces the session; repeated interruptions must not replace it again.
+    // The first interruption replaces the session and clears the peer's
+    // identity. A context copied before the transition retains its snapshot.
     expect(value.mark_connection_interrupted(now + 10ms));
+    expect(ready_context.identity.has_value());
+    expect(!value.make_context(1).identity.has_value());
     expect(!value.ready_for_communication());
     expect(!value.matches_session(session));
     auto interrupted_session = value.get_session();
@@ -401,8 +409,10 @@ int main() {
     expect(!value.can_retry_handshake(now));
     expect(value.can_retry_handshake(now + 10ms));
     expect(value.mark_ready_for_communication());
+    expect(value.make_context(1).identity.has_value());
     expect(!value.can_retry_handshake(now + 1s));
     expect(value.mark_connection_interrupted(now));
+    expect(!value.make_context(1).identity.has_value());
     expect(!value.matches_session(interrupted_session));
   };
 
