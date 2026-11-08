@@ -4,6 +4,7 @@
 #include <future>
 #include <iostream>
 #include <memory>
+#include <pqrs/osx/autorelease_pool.hpp>
 #include <pqrs/osx/xpc.hpp>
 #include <string>
 #include <vector>
@@ -14,7 +15,9 @@ using namespace pqrs::osx::xpc;
 int main() {
   try {
     auto time_source = std::make_shared<pqrs::dispatcher::hardware_time_source>();
-    auto dispatcher = std::make_shared<pqrs::dispatcher::dispatcher>(time_source);
+    auto dispatcher = std::make_shared<pqrs::dispatcher::dispatcher>(
+        time_source,
+        pqrs::osx::autorelease_pool::execute_with_autorelease_pool);
 
     // Keep callback state alive until both transports have been destroyed.
     std::promise<bool> listener_ready;
